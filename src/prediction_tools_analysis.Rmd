@@ -14,7 +14,7 @@ params:
 
 # TODO : 
 ## optional test sets
-https://genomeinterpretation.org/cagi6-invitae.html - registered waiting for confirmation
+https://genomeinterpretation.org/cagi6-invitae.html - registered waiting for confirmation - checked 06/05/2024 - still no confirmation
 
 ## reviews
 golden helix review - https://www.goldenhelix.com/blog/evaluating-deepminds-alphamissense-classifier/
@@ -22,6 +22,15 @@ review - https://www.frontiersin.org/articles/10.3389/fgene.2022.1010327/full
 check the performance of each tool on benign vs pathogenic (maybe benign variants were used in training ans should be replaced)
 benchmarking using deep mutational scans - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10407742/
 becnchmarking analysis - phenotype based - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9313608/#humu24362-sec-0020title
+
+# possible comparisons
+- conservation (high vs low)
+- in domain (interpro, yes vs no)
+- allele frequencies (common vs rare)
+- mode of inheritance (AD vs AR vs X linked)
+- haploinsufficient / triploinsufficient genes
+- pLI  , pRec , under missense constraint, LOF constraint
+- known cancer pathogenic? 
 
 ```{r markdown_setup,include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -40,14 +49,8 @@ proc_data_file<-grep('processed_data.prediction_tool_annotation',list.files(data
 proc_data<-readr::read_delim(proc_data_file,delim='\t')
 # The var sets to analyze
 load(glue('{data_folder_name}/var_sets.RData'))
-# Load the ROC data (large, takes time) 
-# procs - the ROC curves produced for each var set
-# roc_metrics_table - row for each var set, with the AUC and the confidence interval
-load(glue('{data_folder_name}/roc_data.RData'))
 
 excluded_tools<-c('esm1b')
-tools_to_test<-roc_metrics_table%>%filter(!is.na(TP))%>%pull(tool)%>%unique()
-tools_to_test<-grep(paste0(excluded_tools,collapse='|'),tools_to_test,value = T,invert = T)
 ```
 
 # Variant assertion by year added to clinvar
@@ -56,72 +59,42 @@ since we are intereseted in the intra-tool variance, then we should use the enti
 
 ```{r perfo_by_time}
 library(ggtext)
-perf_metric<-'accuracy'
-performance_by_time_table<-
-  roc_metrics_table%>%
-  filter(sub_var_set=='all',missing_option=='full')%>%
-  filter(tool %in% tools_to_test)%>%
-  select(tool,main_var_set,perf_metric)%>%pivot_wider(names_from = main_var_set,values_from = perf_metric)%>%
-  rowwise()%>%
-  mutate(tool=toupper(stringr::str_replace_all(tool,'_score.+','')),
-         sd=sd(c(confident_all,confident_2020,confident_2022)),
-         diff_2020_all=confident_2020-confident_all,
-         diff_2022_all=confident_2022-confident_all,
-         diff_2022_2020=confident_2022-confident_2020,)%>%
-  group_by(tool)%>%
-  mutate(max_2020_all=max(confident_2020,confident_all),
-         max_2022_all=max(confident_2022,confident_all),
-         max_2022_2020=max(confident_2022,confident_2020))%>%ungroup()%>%
-  filter(!is.na(confident_all),!grepl(paste0(excluded_tools,collapse = '|'),tool))
-write.table(performance_by_time_table,file=glue('{analysis_folder_name}/performance_by_time_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
+library(viridis)
+# Set the metric you wish to plot
+perf_metric<-'bal_accuracy'
+selected_main_var_sets<-c('confident_all')
+selected_sub_var_sets<-c(as.character(2013:2023))
+selected_missing_var_sets<-c('full')
+rocs_analysis_results<-calculate_roc_metrics(proc_data,
+                                             main_var_sets[selected_main_var_sets],
+                                             sub_var_sets[selected_sub_var_sets],
+                                             missing_var_sets[selected_missing_var_sets])
 
-# plot the difference between 2022 and the entire dataset
-nudge_value<-0.02
-years_grid<-combn(c('all','2020','2022'),m = 2,simplify = T)
-for (i in 1:ncol(years_grid)){
-  comb<-years_grid[,i]
-  diff_var<-glue('diff_{comb[2]}_{comb[1]}')
-  print(diff_var)
-  max_var<-glue('max_{comb[2]}_{comb[1]}')
-  to_plot<- performance_by_time_table%>%
-    select(tool,max_var,diff_var,glue('confident_{comb[2]}'),glue('confident_{comb[1]}'))%>%
-    pivot_longer(-c(tool,max_var,diff_var))%>%
-    mutate(name=stringr::str_replace_all(name,'confident_',''),
-           tool=forcats::fct_reorder(tool, value))
-  performance_by_time_plot<-
-  to_plot%>%
-    ggplot(aes(x=value,y=tool,label=round(value,3))) +
-    geom_line(aes(group=tool,color=ifelse(!!sym(diff_var)>0,comb[2],comb[1])),alpha=0.2, linewidth=3.5) + 
-    geom_point(aes(color=name), size=3) +
-    geom_text(aes(color=name),
-              size=3,
-              nudge_x=if_else(
-                to_plot$value==to_plot%>%pull(max_var), # if it's the larger value...
-                nudge_value,   # move it to the right of the point
-                -nudge_value))+
-    theme_minimal() +
-    theme(legend.position = "top",
-          axis.text.y = element_text(color="black"),
-          axis.text.x = element_text(color="#989898"),
-          axis.title.y = element_blank(),
-          panel.grid = element_blank(),plot.title = element_markdown(hjust = 0.5))+
-    labs(color='',
-         x=stringr::str_to_title(perf_metric),
-         title = glue("<span style = 'color: #BF2F24;'>{comb[2]}</span> vs <span style = 'color: #436685;'>{comb[1]}</span>",.comment = '$'))+
-    guides(fill='none',color='none')+
-    scale_color_manual(values=c("#436685", "#BF2F24"),labels=c(comb[1],comb[2]))
-  print(performance_by_time_plot)
-  ggsave(filename = glue('{analysis_folder_name}/performance_by_time_{diff_var}_plot.{Sys.Date()}.png'),
-         plot=performance_by_time_plot,
-         device = 'png',
-         height = 10,
-         width = 6,
-         dpi = 300,bg='white')
-}
+tools_to_test<-grep(paste0(excluded_tools,collapse='|'),unique(rocs_analysis_results$roc_metrics_table$tool),value = T,invert = T)
+perf_by_year_table<-
+  rocs_analysis_results$roc_metrics_table%>%
+  filter(tool %in% tools_to_test)
+write.table(aucs,file=glue('{analysis_folder_name}/perf_by_year_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
 
-# by Date
+perf_by_year_plot<-
+  perf_by_year_table%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  ggplot(aes_string(x='sub_var_set',y=perf_metric,color='tool',group='tool'))+
+  geom_point()+
+  geom_line()+
+  theme_minimal()+
+  labs(x='ClinVar Year',y=perf_metric)+
+  scale_color_viridis_d(option = 'turbo')+
+  theme(legend.position = 'top')+
+  labs(color=NULL)
+perf_by_year_plot
 
-
+ggsave(filename = glue('{analysis_folder_name}/{perf_metric}_by_year_plot.{Sys.Date()}.png'),
+       plot=perf_by_year_plot,
+       device = 'png',
+       height = 7,
+       width = 9,
+       dpi = 300,bg='white')
 ```
 
 # Top models 
@@ -129,15 +102,18 @@ collect the top models according to the median AUC
 
 ```{r rocs}
 # Definitions
-selected_main_var_set<-'confident_2020'
-selected_sub_var_set<-'all'
-selected_missing_option<-'no_missing'
+selected_main_var_sets<-'confident_all'
+selected_sub_var_sets<-'at_or_after_2020'
+selected_missing_var_sets<-'no_missing'
 top_num<-10
 
 # collect the corresponding dataset
-rocs_data<-procs[[selected_main_var_set]][[selected_sub_var_set]][[selected_missing_option]]
-aucs<-roc_metrics_table%>%
-  filter(main_var_set==selected_main_var_set,sub_var_set==selected_sub_var_set,missing_option==selected_missing_option)%>%
+top_models_analysis_res<-calculate_roc_metrics(proc_data,
+                                             main_var_sets[selected_main_var_sets],
+                                             sub_var_sets[selected_sub_var_sets],
+                                             missing_var_sets[selected_missing_var_sets])
+rocs_data<-top_models_analysis_res$procs[[selected_main_var_sets]][[selected_sub_var_sets]][[selected_missing_var_sets]]
+aucs<-top_models_analysis_res$roc_metrics_table%>%
   filter(tool %in% tools_to_test)%>%
   filter(!is.na(TP))
 write.table(aucs,file=glue('{analysis_folder_name}/aucs_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
@@ -156,7 +132,7 @@ roc_table<-roc_table%>%filter(tool %in% tools_to_test)%>%
   left_join(aucs)%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper(),
          top_tools=ifelse(tool%in%top_tools,tool,'Other'),
-         top_tools=forcats::fct_reorder(top_tools,AUC50.))
+         top_tools=forcats::fct_reorder(top_tools,desc(AUC50.)))
 
 colors <- setNames(ggsci::pal_d3()(top_num), top_tools)
 colors["Other"] <- "lightgray" 
@@ -164,8 +140,10 @@ colors["Other"] <- "lightgray"
 # Plot the ROC for all the tools and emphasize the top ones
 top_models_roc_plot<-
   roc_table%>%
+  filter(top_tools=='Other')%>%
   ggplot(aes(x=1-specificity,y=sensitivity,color=factor(top_tools),group=tool))+
   geom_line(linewidth=1)+
+  geom_line(data=roc_table%>%filter(top_tools!='Other'),linewidth=1)+
   geom_abline(slope = 1,intercept = 0,linetype=2,alpha=0.4)+
   theme_minimal()+
   theme(legend.position = 'top')+
@@ -181,72 +159,22 @@ ggsave(filename = glue('{analysis_folder_name}/top_models_roc_plot.{Sys.Date()}.
 
 ```
 
-# AM vs REVEL
-
-```{r am_vs_revel}
-tools_to_plot<-c('alphamissense_score.dbnsfp4.5a','revel_score.dbnsfp4.5a')
-
-# performance - AM versus REVEL  
-tools_to_plot<-c('alphamissense_score.dbnsfp4.5a','revel_score.dbnsfp4.5a')
-hist_all<-plot_hist_by_class(proc_data[main_var_sets$confident_2020 & sub_var_sets$all & missing_var_sets$full,],
-                             tools_to_plot = tools_to_plot,title='All')
-hist_all
-ggsave(filename = glue('{analysis_folder_name}/am_vs_revel_hist_all_plot.{Sys.Date()}.png'),
-       plot=hist_all,
-       device = 'png',
-       height = 8,
-       width = 8,
-       dpi = 300,bg='white')
-hist_ad<-plot_hist_by_class(proc_data[main_var_sets$confident_2020 & sub_var_sets$AD & missing_var_sets$full,],
-                            tools_to_plot = tools_to_plot,title='AD')
-hist_ad
-ggsave(filename = glue('{analysis_folder_name}/am_vs_revel_hist_ad_plot.{Sys.Date()}.png'),
-       plot=hist_ad,
-       device = 'png',
-       height = 8,
-       width = 8,
-       dpi = 300,bg='white')
-hist_ar<-plot_hist_by_class(proc_data[main_var_sets$confident_2020 & sub_var_sets$AR & missing_var_sets$full,],
-                            tools_to_plot = tools_to_plot,title='AR')
-hist_ar
-ggsave(filename = glue('{analysis_folder_name}/am_vs_revel_hist_ar_plot.{Sys.Date()}.png'),
-       plot=hist_ar,
-       device = 'png',
-       height = 8,
-       width = 8,
-       dpi = 300,bg='white')
-am_vs_revel_hist_plot<-wrap_plots((hist_all+labs(x=NULL,y=NULL)),(hist_ad+guides(fill='none')),(hist_ar+labs(y=NULL,fill=NULL)+guides(fill='none')),nrow=3)
-ggsave(filename = glue('{analysis_folder_name}/am_vs_revel_hist_plot.{Sys.Date()}.png'),
-       plot=am_vs_revel_hist_plot,
-       device = 'png',
-       height = 10,
-       width = 6,
-       dpi = 300,bg='white')
-
-
-to_plot<-proc_data %>%
-  mutate(moi = case_when(
-    sub_var_sets[['AD']] == TRUE ~ "AD",
-    sub_var_sets[['AR']] == TRUE ~ "AR",
-    TRUE ~ NA_character_  # This line handles cases where none of the conditions above are met
-  ))%>%
-  filter(main_var_sets$confident_2020&missing_var_sets$full&!is.na(facet))
-plot_calibration(to_plot,
-                 tools_to_plot = tools_to_plot,
-                 facet='moi',
-                 balanced = T,text_size=18)
-
-
-```
-
 # Affect of conservation
 
 ```{r conservation}
+
+selected_main_var_sets<-'confident_all'
+selected_sub_var_sets<-grep('conserv',names(sub_var_sets),value = T)
+selected_missing_var_sets<-'full'
+
+conservation_analysis_res<-calculate_roc_metrics(proc_data,
+                                             main_var_sets[selected_main_var_sets],
+                                             sub_var_sets[selected_sub_var_sets],
+                                             missing_var_sets[selected_missing_var_sets])
+
+
 performance_by_conservation_table<-
-  roc_metrics_table%>%
-  filter(tool %in% tools_to_test)%>%
-  filter(grepl('conserv',sub_var_set))%>%
-  filter(main_var_set=='confident_all',missing_option=='full')%>%
+  conservation_analysis_res$roc_metrics_table%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   mutate(tool=forcats::fct_reorder(tool,AUC50.),
          sub_var_set=stringr::str_replace(sub_var_set,'_conservation','')%>%stringr::str_to_title())%>%

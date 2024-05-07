@@ -14,9 +14,7 @@ conservation_column<-'phylop100way_vertebrate.dbnsfp4.5a'
 num_o_conservation_levels<-3
 ## The main var sets ####
 ## these var sets will be further subdivided into the different sub_var_sets
-main_var_sets<-list('confident_all'=grepl('(criteria_provided,_multiple_submitters,_no_conflicts)|(criteria_provided,_single_submitter)|(reviewed_by_expert_panel)',proc_data$clinvar_review.dbnsfp4.5a),
-                    'confident_2020'=grepl('(criteria_provided,_multiple_submitters,_no_conflicts)|(criteria_provided,_single_submitter)|(reviewed_by_expert_panel)',proc_data$clinvar_review.dbnsfp4.5a)&proc_data$min_date>'2020-01-01',
-                    'confident_2022'=grepl('(criteria_provided,_multiple_submitters,_no_conflicts)|(criteria_provided,_single_submitter)|(reviewed_by_expert_panel)',proc_data$clinvar_review.dbnsfp4.5a)&proc_data$min_date>'2022-01-01')
+main_var_sets<-list('confident_all'=grepl('(criteria_provided,_multiple_submitters,_no_conflicts)|(criteria_provided,_single_submitter)|(reviewed_by_expert_panel)',proc_data$clinvar_review.dbnsfp4.5a))
 
 # missing values filter ####
 tools_list<-grep('_score',colnames(proc_data),value = T)
@@ -42,6 +40,16 @@ sub_var_sets<-list('all'=rep(TRUE,nrow(proc_data)),
                    'AR'=proc_data$inheritance.clinical.genomic.database.2023.05.04..ghi=='Autosomal Recessive')
 
 sub_var_sets[['multiple_submitters']]<-grepl('(criteria_provided,_multiple_submitters,_no_conflicts)|(reviewed_by_expert_panel)',proc_data$clinvar_review.dbnsfp4.5a)
+# Per year var set
+years<-2013:2023
+date_col<-'date_created'
+for (year in years){
+  sub_var_sets[[as.character(year)]]<-!is.na(proc_data%>%pull(date_col)) & year(proc_data%>%pull(date_col))==year
+  sub_var_sets[[glue('at_or_after_{year}')]]<-!is.na(proc_data%>%pull(date_col)) & year(proc_data%>%pull(date_col))>=year
+  sub_var_sets[[glue('before_{year}')]]<-!is.na(proc_data%>%pull(date_col)) & year(proc_data%>%pull(date_col))<year
+}
+sub_var_sets[['2013']]<-!is.na(proc_data%>%pull(date_col)) & year(proc_data%>%pull(date_col))<=2013
+
 
 
 ### Allele frequency ####
