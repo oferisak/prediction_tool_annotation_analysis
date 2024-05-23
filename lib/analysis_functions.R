@@ -2,7 +2,8 @@ generate_var_set_combinations <- function(...) {
   lists <- list(...)
   names_lists <- lapply(lists, names)
   combination_df <- expand.grid(names_lists)
-  colnames(combination_df) <- paste0("list", seq_along(lists))
+  colnames(combination_df) <- paste0("filter", seq_along(lists))
+  combination_df<-combination_df%>%mutate(across(all_of(colnames(combination_df)),as.character))
   return(combination_df)
 }
 
@@ -11,24 +12,33 @@ produce_roc<-function(scores_table,tool){
   return(proc)
 }
 
-calculate_roc_metrics<-function(proc_data,selected_main_var_sets,selected_sub_var_sets,selected_missing_var_sets){
-  all_var_set_combinations<-generate_var_set_combinations(selected_main_var_sets,selected_sub_var_sets,selected_missing_var_sets)
-  colnames(all_var_set_combinations)<-c('main_var_set','sub_var_set','missing_var_set')
+combine_filter_sets<-function(var_sets, var_set_names) {
+  if (!all(var_set_names %in% names(var_sets))) {
+    stop("One or more specified elements do not exist in the list")
+  }
+  # Extract the vectors corresponding to the specified elements
+  selected_vectors <- var_sets[var_set_names]
+  # Compute the intersection where all are TRUE
+  result <- Reduce(`&`, selected_vectors)
+  return(result)
+}
+
+calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=TRUE){
   roc_metrics_table<-NULL
   rocs_table<-NULL
   procs<-list()
-  #balancing_options<-c('all_class','balanced_class')
-  missing_table<-NULL
-  for (i in 1:nrow(all_var_set_combinations)){
-    main_var_set<-as.character(all_var_set_combinations%>%slice(i)%>%pull(main_var_set))
-    sub_var_set<-as.character(all_var_set_combinations%>%slice(i)%>%pull(sub_var_set))
-    missing_option<-as.character(all_var_set_combinations%>%slice(i)%>%pull(missing_var_set))
-    if (!(main_var_set%in%names(procs))){procs[[main_var_set]]<-list()}
-    if (!(sub_var_set%in%names(procs[[main_var_set]]))){procs[[main_var_set]][[sub_var_set]]<-list()}
-    if (!(missing_option%in%names(procs[[main_var_set]][[sub_var_set]]))){procs[[main_var_set]][[sub_var_set]][[missing_option]]<-list()}
-    message(glue('{i}/{nrow(all_var_set_combinations)}:analyzing {main_var_set}:{sub_var_set}:{missing_option}'))
+  for (i in 1:nrow(var_sets_list)){
+    row<-var_sets_list[i,,drop=F]
+    message(glue('{i}/{nrow(var_sets_list)}:analyzing {paste0(row%>%slice(1),collapse=":")}'))
     # calculate rocs
-    var_set<-proc_data%>%filter(main_var_sets[[main_var_set]]&sub_var_sets[[sub_var_set]]&missing_var_sets[[missing_option]])
+    var_set<-proc_data%>%filter(combine_filter_sets(var_sets,row%>%as.character()))
+    if (complete){
+      original_nrow<-nrow(var_set)
+      var_set<-var_set%>%filter(if_any(all_of(tools_to_test), is.na))
+      complete_nrow<-nrow(var_set)
+      message(glue('Out of {original_nrow} variants, {complete_nrow} ({round(complete_nrow/original_nrow,3)}) had values in all of the tools to test'))
+    }
+    var_set<-var_set%>%mutate(revel_pred.dbnsfp4.5a=ifelse(revel_score.dbnsfp4.5a>0.5,'D','T'))
     for (tool in tools_list) {
       #print(tool)
       tool_var_set<-var_set%>%filter(!is.na(!!sym(tool)))
@@ -36,49 +46,41 @@ calculate_roc_metrics<-function(proc_data,selected_main_var_sets,selected_sub_va
         message(glue('There werent enough cases/controls for {tool}'))
         next()
       }
-      procs[[main_var_set]][[sub_var_set]][[missing_option]][[tool]]<-list()
       proc <- suppressMessages(produce_roc(tool_var_set,tool))
-      
-      procs[[main_var_set]][[sub_var_set]][[missing_option]][[tool]]<-proc
+      procs[[paste0(c(row%>%as.character(),tool,ifelse(complete,'complete','full')),collapse='|')]]<-proc
       # calculate confusion matrix
       tool_cat<-stringr::str_replace(tool,'_score','_pred')
-      tool_metrics<-data.frame(main_var_set,
-                               sub_var_set,
-                               missing_option,
+      tool_metrics<-data.frame(row,
+                               complete=complete,
                                total=nrow(tool_var_set),
                                tool=tool,
                                data.frame(as.numeric(proc$ci))%>%
                                  mutate(names=c('AUC2.5','AUC50.','AUC97.5'))%>%
                                  pivot_wider(names_from = names,values_from = as.numeric.proc.ci.))
       if (tool_cat%in%colnames(var_set)){
-        
         var_set <- var_set %>% mutate(
-          revel_pred.dbnsfp4.5a=ifelse(revel_score.dbnsfp4.5a>0.5,'P/LP','B/LB'),
-          alphamissense_pred.dbnsfp4.5a=ifelse(alphamissense_pred.dbnsfp4.5a=='A',NA,alphamissense_pred.dbnsfp4.5a),
+          #alphamissense_pred.dbnsfp4.5a=ifelse(alphamissense_pred.dbnsfp4.5a=='A',NA,alphamissense_pred.dbnsfp4.5a),
           preds = !!sym(tool_cat),
           preds = case_when(
-            (preds=='P' & tool_cat=='mutationtaster_pred.dbnsfp4.5a')~'B',
-            TRUE~preds
-          ),
-          preds = case_when(
-            preds %in% c('A','P', 'D','H','M','P/LP') ~ 'P/LP',
-            preds %in% c('B', 'T','N','L','B/LB') ~ 'B/LB',
-            TRUE ~ NA
+            preds=='D'~ 'P/LP',
+            preds=='T' ~ 'B/LB',
+            .default= NA
           ))%>%
           
           mutate(preds = factor(preds),
                  clinvar_class = factor(clinvar_class))
-        if (var_set%>%count(preds)%>%nrow()<2){next}
-        cm<-yardstick::conf_mat(data=var_set,truth='clinvar_class',estimate='preds')
-        cm<-data.frame(TP=cm$table['P/LP','P/LP'],
-                       TN=cm$table['B/LB','B/LB'],
-                       FP=cm$table['P/LP','B/LB'],
-                       FN=cm$table['B/LB','P/LP'])
-        metrics_to_calc<-yardstick::metric_set(yardstick::sens,yardstick::spec,yardstick::ppv,yardstick::npv,yardstick::accuracy,yardstick::bal_accuracy)
-        added_metrics<-metrics_to_calc(data=var_set,truth='clinvar_class',estimate='preds',event_level = 'second')%>%
-          select(-.estimator)%>%pivot_wider(names_from = .metric,values_from = .estimate)
-        tool_metrics<-tool_metrics%>%
-          bind_cols(data.frame(cm,added_metrics))
+        if (var_set%>%count(preds)%>%nrow()>=2){
+          cm<-yardstick::conf_mat(data=var_set,truth='clinvar_class',estimate='preds')
+          cm<-data.frame(TP=cm$table['P/LP','P/LP'],
+                         TN=cm$table['B/LB','B/LB'],
+                         FP=cm$table['P/LP','B/LB'],
+                         FN=cm$table['B/LB','P/LP'])
+          metrics_to_calc<-yardstick::metric_set(yardstick::sens,yardstick::spec,yardstick::ppv,yardstick::npv,yardstick::accuracy,yardstick::bal_accuracy)
+          added_metrics<-metrics_to_calc(data=var_set,truth='clinvar_class',estimate='preds',event_level = 'second')%>%
+            select(-.estimator)%>%pivot_wider(names_from = .metric,values_from = .estimate)
+          tool_metrics<-tool_metrics%>%
+            bind_cols(data.frame(cm,added_metrics))
+        }
       }
       roc_metrics_table<-roc_metrics_table%>%bind_rows(tool_metrics)
     }
@@ -87,4 +89,31 @@ calculate_roc_metrics<-function(proc_data,selected_main_var_sets,selected_sub_va
     to_ret[['roc_metrics_table']]<-roc_metrics_table
   }
   return(to_ret)
+}
+
+plot_roc<-function(raw_roc_table,overall_performance_table,top_tools,year_to_analyze){
+  roc_table<-raw_roc_table%>%
+    #filter(tool %in% tools_to_test)%>%
+    filter(year==year_to_analyze)%>%
+    left_join(overall_performance_table%>%
+                rename(year=filter1))%>%
+    mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper(),
+           tool_with_auc=ifelse(tool%in%top_tools$tool,glue('{tool} ({round(AUC50.,3)})'),'Other'),
+           tool_with_auc=forcats::fct_reorder(tool_with_auc,desc(AUC50.)))
+  colors <- setNames(colorRampPalette(c("darkred", "darkcyan", "darkorange",'darkmagenta'))(length(unique(roc_table$tool_with_auc))), setdiff(unique(roc_table$tool_with_auc),'Other'))
+  colors["Other"] <- "lightgray" 
+  print(colors)
+  # Plot the ROC for all the tools and emphasize the top ones
+  roc_plot<-
+    roc_table%>%filter(tool_with_auc=='Other')%>%
+    ggplot(aes(x=1-specificity,y=sensitivity,color=tool_with_auc,group=tool))+
+    geom_line(linewidth=1)+
+    geom_line(data=roc_table%>%filter(tool_with_auc!='Other'),linewidth=1)+
+    geom_abline(slope = 1,intercept = 0,linetype=2,alpha=0.4)+
+    scale_color_manual(values=colors)+
+    theme_minimal()+
+    theme(legend.position = 'top')+
+    labs(color=NULL)
+  print(roc_plot)
+  return(roc_plot)
 }

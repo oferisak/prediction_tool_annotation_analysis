@@ -13,6 +13,10 @@ params:
 ---
 
 # TODO : 
+went over the missing values - they are really missing.. 
+asked GPT to gather the tools with their corresponding publication years. probably will need to go over one by one and see if they used clinvar or not and if so what year.. 
+go function and biological process
+
 ## optional test sets
 https://genomeinterpretation.org/cagi6-invitae.html - registered waiting for confirmation - checked 06/05/2024 - still no confirmation
 
@@ -24,13 +28,14 @@ benchmarking using deep mutational scans - https://www.ncbi.nlm.nih.gov/pmc/arti
 becnchmarking analysis - phenotype based - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9313608/#humu24362-sec-0020title
 
 # possible comparisons
+- completeness (how many variants have a score)
 - conservation (high vs low)
 - in domain (interpro, yes vs no)
 - allele frequencies (common vs rare)
 - mode of inheritance (AD vs AR vs X linked)
 - haploinsufficient / triploinsufficient genes
 - pLI  , pRec , under missense constraint, LOF constraint
-- known cancer pathogenic? 
+- known cancer pathogenic? (downloaded data from oncovar. consider uploading as a new project and annotating it)
 
 ```{r markdown_setup,include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -38,9 +43,15 @@ setwd('/media/SSD/Bioinformatics/Projects/prediction_tool_annotation_analysis/')
 library(ProjectTemplate)
 load.project()
 
-data_folder_name<-'./data/preprocessed_data/2024-01-17'
+data_folder_name<-'./data/preprocessed_data/2024-05-14'
 analysis_folder_name<-glue('./output/prediction_tools_analysis.{Sys.Date()}')
 if (!dir.exists(analysis_folder_name)){dir.create(analysis_folder_name)}
+
+# Definitions ####
+# the year that will be used for all subsequent analysis
+year_to_analyze<-'at_or_after_2023'
+# the varity_r score is the best out of the varities, eve and mutpred have a high rate of missingness
+excluded_tools<-c('fathmm.xf_coding','esm1b','varity_r_loo','varity_er','varity_er_loo','eve','mutpred') 
 ```
 
 ```{r load_preprocessed_data}
@@ -49,9 +60,44 @@ proc_data_file<-grep('processed_data.prediction_tool_annotation',list.files(data
 proc_data<-readr::read_delim(proc_data_file,delim='\t')
 # The var sets to analyze
 load(glue('{data_folder_name}/var_sets.RData'))
+#excluded_tools<-c('esm1b')
+tools_list<-grep('_score',colnames(proc_data),value = T)
+tools_without_excluded<-setdiff(tools_list,paste0(excluded_tools,'_score.dbnsfp4.5a'))
 
-excluded_tools<-c('esm1b')
+# converted scores (in which lower score means higher prob of P)
+converted_scores<-stringr::str_match(colnames(proc_data),'(.+)_converted')[,2]%>%unique()
+converted_scores<-glue('{converted_scores[!is.na(converted_scores)]}_score.dbnsfp4.5a')
 ```
+
+# Missingness
+```{r missingness}
+missing_count<-sapply(tools_list,function(tool) {proc_data%>%filter(is.na(!!sym(tool)))%>%nrow()})
+missing_count<-missing_count%>%as.data.frame()%>%rename(n_missing='.')%>%mutate(missing_rate=n_missing/nrow(proc_data))
+missing_count
+
+missing_rate_plot<-
+missing_count%>%
+  mutate(tool=stringr::str_replace(rownames(missing_count),'_score.+','')%>%toupper())%>%
+  ggplot(aes(x=forcats::fct_reorder(tool,missing_rate),y=missing_rate,label=glue('{round(missing_rate,2)*100}%')))+
+  geom_col(alpha=0.5)+
+  geom_text(nudge_y = 0.03,size=3)+
+  coord_flip()+
+  scale_y_continuous(labels = scales::percent)+
+  theme_minimal()+
+  labs(x=NULL,y='Missing rate')
+missing_rate_plot
+ggsave(filename = glue('{analysis_folder_name}/missing_rate_plot.{Sys.Date()}.png'),
+       plot=missing_rate_plot,
+       device = 'png',
+       height = 10,
+       width = 8,
+       dpi = 300,bg='white')
+
+skimr::skim(missing_count$missing_rate)
+
+```
+
+Initial review of the data revealed varying rates of missing values across different scores in the dbNSFP4.5a database (median 0.377 IQR[0.13,0.43]). EVE (0.715) and MutPred (0.634) had the highest missingness rate. In contrast, MutationTaster, FATHMM, DANN, Genocanyon, BayesDel and fitCons all had a missing rate lower than 0.1. 
 
 # Variant assertion by year added to clinvar
 metrics to test options  - AUC , Accuracy, Balanced accuracy
@@ -60,133 +106,248 @@ since we are intereseted in the intra-tool variance, then we should use the enti
 ```{r perfo_by_time}
 library(ggtext)
 library(viridis)
-# Set the metric you wish to plot
-perf_metric<-'bal_accuracy'
-selected_main_var_sets<-c('confident_all')
-selected_sub_var_sets<-c(as.character(2013:2023))
-selected_missing_var_sets<-c('full')
-rocs_analysis_results<-calculate_roc_metrics(proc_data,
-                                             main_var_sets[selected_main_var_sets],
-                                             sub_var_sets[selected_sub_var_sets],
-                                             missing_var_sets[selected_missing_var_sets])
+library(fuzzyjoin)
 
-tools_to_test<-grep(paste0(excluded_tools,collapse='|'),unique(rocs_analysis_results$roc_metrics_table$tool),value = T,invert = T)
+# the clinvar_training_date is derived from the date the clinvar dataset was downloaded or if not available - the publication date
+tools_with_pub_year<-readxl::read_xlsx('./data/accessory_data/tools_list.xlsx')
+
+# Set the metric you wish to plot
+analysis_var_sets<-generate_var_set_combinations(var_sets['all'],var_sets[c(as.character(2013:2024))])
+rocs_analysis_results<-calculate_roc_metrics(proc_data,
+                                             analysis_var_sets,
+                                             tools_without_exclusion,
+                                             complete=F)
+
+if (length(excluded_tools)>0){
+  tools_to_test<-grep(paste0(excluded_tools,collapse='|'),unique(rocs_analysis_results$roc_metrics_table$tool),value = T,invert = T)
+}else{tools_to_test<-tools_list}
 perf_by_year_table<-
   rocs_analysis_results$roc_metrics_table%>%
-  filter(tool %in% tools_to_test)
-write.table(aucs,file=glue('{analysis_folder_name}/perf_by_year_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
+  rename(year=filter2)%>%
+  filter(tool %in% tools_to_test)%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())
+# add publication year
+perf_by_year_table<-perf_by_year_table%>%
+  left_join(
+    tools_with_pub_year%>%
+      rename(pub_year="Publication Year"))%>%
+  mutate(pub_year=as.character(pub_year),
+         training_year=as.character(clinvar_training_date))
+write.table(perf_by_year_table,file=glue('{analysis_folder_name}/perf_by_year_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
 
+perf_metric<-'AUC50.'
 perf_by_year_plot<-
   perf_by_year_table%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
-  ggplot(aes_string(x='sub_var_set',y=perf_metric,color='tool',group='tool'))+
-  geom_point()+
-  geom_line()+
-  theme_minimal()+
+  ggplot(aes_string(x='year',y=perf_metric,group='tool'))+
+  geom_point(size=1)+geom_line()+
+  facet_wrap(tool~.,scales='free')+
   labs(x='ClinVar Year',y=perf_metric)+
   scale_color_viridis_d(option = 'turbo')+
+  geom_vline(aes(xintercept=training_year),data=perf_by_year_table,linetype=2,color='darkred')+
+  theme_minimal()+
   theme(legend.position = 'top')+
-  labs(color=NULL)
+  labs(color=NULL)+theme(axis.text.x = element_text(angle = 90))
 perf_by_year_plot
 
 ggsave(filename = glue('{analysis_folder_name}/{perf_metric}_by_year_plot.{Sys.Date()}.png'),
        plot=perf_by_year_plot,
        device = 'png',
-       height = 7,
-       width = 9,
+       height = 8,
+       width = 12,
        dpi = 300,bg='white')
+
+# analyze results per tool to identify tools with decreasing values
+analysis_table <- perf_by_year_table %>%mutate(year=as.numeric(year),
+                                      before_training=ifelse(year<=as.numeric(training_year),
+                                                             'before_training','after_training'))%>%
+  mutate(ifelse(year<=2013,NA,year))%>%
+  mutate(before_training=forcats::fct_relevel(before_training,'before_training'))
+  
+no_clinvar_training_tools<-analysis_table%>%group_by(tool)%>%summarize(before_and_after=length(unique(before_training)))%>%filter(before_and_after<2)%>%pull(tool)
+
+# analyzing effect over time
+lm_by_year<-
+  perf_by_year_table%>%
+  mutate(year=as.numeric(year))%>%
+  group_by(tool) %>%
+  do(tidy(lm(AUC50. ~ year, data = .)))%>%
+  filter(term=='year')
+
+# analyze before and after training
+lm_by_training_year<-
+  analysis_table%>%
+  filter(!tool %in% no_clinvar_training_tools)%>%
+  group_by(tool) %>%
+  do(tidy(lm(AUC50. ~ before_training, data = .)))%>%
+  filter(term=='before_trainingafter_training')
+
 ```
 
-# Top models 
-collect the top models according to the median AUC
+The results of the analysis demonstrate that the majority of the predictive tools evaluated do not exhibit a significant change in performance over the years indicating a stable predictive accuracy over the evaluated period. A few tools did show significant variations. Specifically, fitCons scores demosntrated an improvement throughout the years while VEST4's performance decreased (-0.005 per year; p=0.0039). Analyzing tool performance before and after model training also demonstrated stable performance for most tools. Tools that exhibited noteworthy decrease in AUC included CLINPRED (-0.015; p=0.0401) and METARNN (0.016; p=0.0082). 
+
+# Overall performance models 
+collect overall perforamance for each model
 
 ```{r rocs}
 # Definitions
-selected_main_var_sets<-'confident_all'
-selected_sub_var_sets<-'at_or_after_2020'
-selected_missing_var_sets<-'no_missing'
+tools_to_test<-tools_without_excluded
+time_var_set<-c('at_or_after_2021','at_or_after_2022','at_or_after_2023','at_or_after_2024')
 top_num<-10
 
-# collect the corresponding dataset
-top_models_analysis_res<-calculate_roc_metrics(proc_data,
-                                             main_var_sets[selected_main_var_sets],
-                                             sub_var_sets[selected_sub_var_sets],
-                                             missing_var_sets[selected_missing_var_sets])
-rocs_data<-top_models_analysis_res$procs[[selected_main_var_sets]][[selected_sub_var_sets]][[selected_missing_var_sets]]
-aucs<-top_models_analysis_res$roc_metrics_table%>%
-  filter(tool %in% tools_to_test)%>%
-  filter(!is.na(TP))
-write.table(aucs,file=glue('{analysis_folder_name}/aucs_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
+analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set])
+# overall performance for the complete var set - no missing data for any of the tools
+overall_performance_complete_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_without_excluded,complete = T)
+# overall perforamnce for the full var set - the performance of each tool on all of it's annotated variants
+overall_performance_full_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_without_excluded,complete = F)
 
-# Collect the top tools
-top_tools<-aucs%>%slice_max(order_by = AUC50.,n=top_num)%>%pull(tool)%>%stringr::str_replace('_score.+','')%>%toupper()
+rocs_data<-c(overall_performance_complete_analysis_res$procs,overall_performance_full_analysis_res$procs)
+overall_performance_table<-overall_performance_complete_analysis_res$roc_metrics_table%>%
+  bind_rows(overall_performance_full_analysis_res$roc_metrics_table)%>%
+  filter(tool %in% tools_to_test)%>%
+  mutate(complete=ifelse(complete,'complete','full'))
+write.table(overall_performance_table,file=glue('{analysis_folder_name}/overall_performance.{Sys.Date()}.csv'),row.names = F,sep='\t')
+
+# Collect the top tools rank
+top_tools_rank<-overall_performance_table%>%
+  group_by(filter1,complete)%>%
+  slice_max(order_by = AUC50.,n=top_num)%>%
+  mutate(rank=rank(-AUC50.))%>%
+  select(filter1,complete,tool,rank)%>%
+  pivot_wider(id_cols = c(tool,complete),names_from = filter1,values_from = rank)
+
+# Collect the top tools auc
+top_tools_auc<-overall_performance_table%>%
+  group_by(filter1,complete)%>%
+  slice_max(order_by = AUC50.,n=top_num)%>%
+  select(filter1,complete,tool,AUC50.)%>%
+  pivot_wider(id_cols = c(tool,complete),names_from = filter1,values_from = AUC50.)
+
+top_tools<-overall_performance_table%>%group_by(complete)%>%filter(filter1==year_to_analyze)%>%
+  slice_max(order_by = AUC50.,n=top_num)%>%select(tool)%>%mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())
 
 # generate the rocs table
-roc_table<-NULL
-for (tool in names(rocs_data)){
-  roc_table<-roc_table%>%bind_rows(
-    data.frame(tool=tool,sensitivity=rocs_data[[tool]]$sensitivities,specificity=rocs_data[[tool]]$specificities)
+raw_roc_table<-NULL
+for (var_set in names(rocs_data)){
+  split_var_set<-stringr::str_split(var_set,'\\|')%>%unlist()
+  tool=split_var_set[2]
+  if (!tool %in% tools_to_test){next}
+  raw_roc_table<-raw_roc_table%>%bind_rows(
+    data.frame(var_set=var_set,
+               year=split_var_set[1],
+               tool=split_var_set[2],
+               complete=split_var_set[3],
+               sensitivity=rocs_data[[var_set]]$sensitivities,
+               specificity=rocs_data[[var_set]]$specificities)
   )
 }
-roc_table<-roc_table%>%filter(tool %in% tools_to_test)%>%
-  left_join(aucs)%>%
-  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper(),
-         top_tools=ifelse(tool%in%top_tools,tool,'Other'),
-         top_tools=forcats::fct_reorder(top_tools,desc(AUC50.)))
 
-colors <- setNames(ggsci::pal_d3()(top_num), top_tools)
-colors["Other"] <- "lightgray" 
+# ROCs for the complete (no-missing) dataset
+top_tools_complete_roc_plot<-
+plot_roc(raw_roc_table%>%filter(complete=='complete'),
+         overall_performance_table%>%filter(complete=='complete'),
+         top_tools%>%filter(complete)%>%ungroup(),
+         year_to_analyze)
+# ROCs for the full dataset
+top_tools_full_roc_plot<-
+plot_roc(raw_roc_table%>%filter(complete=='full'),
+         overall_performance_table%>%filter(complete=='full'),
+         top_tools%>%filter(!complete)%>%ungroup(),
+         year_to_analyze)
 
-# Plot the ROC for all the tools and emphasize the top ones
-top_models_roc_plot<-
-  roc_table%>%
-  filter(top_tools=='Other')%>%
-  ggplot(aes(x=1-specificity,y=sensitivity,color=factor(top_tools),group=tool))+
-  geom_line(linewidth=1)+
-  geom_line(data=roc_table%>%filter(top_tools!='Other'),linewidth=1)+
-  geom_abline(slope = 1,intercept = 0,linetype=2,alpha=0.4)+
-  theme_minimal()+
-  theme(legend.position = 'top')+
-  scale_color_manual(values=colors)+
-  labs(color=NULL)
+library(patchwork)
+top_models_roc_plot<-(top_tools_complete_roc_plot+labs(title='A'))+(top_tools_full_roc_plot+labs(title='B'))
 top_models_roc_plot
-ggsave(filename = glue('{analysis_folder_name}/top_models_roc_plot.{Sys.Date()}.png'),
+
+ggsave(filename = glue('{analysis_folder_name}/top_models_roc_plot.{year_to_plot}.{Sys.Date()}.png'),
        plot=top_models_roc_plot,
        device = 'png',
        height = 7,
-       width = 7,
+       width = 15,
        dpi = 300,bg='white')
 
+# bump chart (less informative)  
+library(ggbump)
+top_tools_rank%>%
+  select(tool,as.character(2020:2024))%>%
+  pivot_longer(-tool)%>%
+  #filter(!is.na(value))%>%
+  ggplot(aes(x=as.numeric(name),y=-value,color=tool))+
+  geom_bump()+
+  geom_point()+
+  theme_minimal()
+
+top_tools_2023<-top_tools_rank%>%filter(!is.na(at_or_after_2023))%>%pull(tool)
 ```
 
 # Affect of conservation
 
 ```{r conservation}
 
-selected_main_var_sets<-'confident_all'
-selected_sub_var_sets<-grep('conserv',names(sub_var_sets),value = T)
-selected_missing_var_sets<-'full'
+year_to_plot<-'at_or_after_2023'
+conservation_var_sets<-grep('conserv',names(var_sets),value = T)
+analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_plot],var_sets[conservation_var_sets])
 
-conservation_analysis_res<-calculate_roc_metrics(proc_data,
-                                             main_var_sets[selected_main_var_sets],
-                                             sub_var_sets[selected_sub_var_sets],
-                                             missing_var_sets[selected_missing_var_sets])
-
+conservation_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F)
 
 performance_by_conservation_table<-
   conservation_analysis_res$roc_metrics_table%>%
+  filter(tool %in% tools_to_test)%>%
+  rename(conservation_level=filter2)%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   mutate(tool=forcats::fct_reorder(tool,AUC50.),
-         sub_var_set=stringr::str_replace(sub_var_set,'_conservation','')%>%stringr::str_to_title())%>%
-  select(main_var_set,sub_var_set,missing_option,tool,total,AUC50.,sens,spec)
+         conservation_level=stringr::str_replace(conservation_level,'_conservation','')%>%stringr::str_to_title(),
+         conservation_level=factor(conservation_level,levels = c('Low','Intermediate','High')))%>%
+  select(filter1,conservation_level,tool,total,AUC50.,sens,spec)
 write.table(performance_by_conservation_table,file=glue('{analysis_folder_name}/performance_by_conservation_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
 
-# conservation - performance per cons level
+performance_by_conservation_table<-performance_by_conservation_table%>%
+  left_join(performance_by_conservation_table%>%group_by(tool)%>%mutate(min_auc=min(AUC50.),max_auc=max(AUC50.),min_max_diff=max_auc-min_auc)%>%select(tool,conservation_level,min_max_diff))
+
+performance_by_conservation_table<-performance_by_conservation_table%>%mutate(tool=forcats::fct_reorder(tool,min_max_diff))
+
+performance_by_conservation_table%>%
+  select(conservation_level,tool,total,AUC50.)%>%
+  pivot_wider(id_cols = tool,names_from = conservation_level,values_from = AUC50.)
+
+# analyze results using mixed effects model
+library(nlme)
+model <- lme(AUC50. ~ conservation_level,random=~1 | tool, data = performance_by_conservation_table)
+summary(model)
+plot(model)
+
 performance_by_conservation_plot<-
-  performance_by_conservation_table%>%
-  pivot_longer(-c(tool,main_var_set,sub_var_set,missing_option,total))%>%
+performance_by_conservation_table%>%
+  left_join(
+    performance_by_conservation_table%>%group_by(tool)%>%summarize(min_auc=min(AUC50.),max_auc=max(AUC50.))
+  )%>%
+  filter(!is.na(sens))%>%
+  pivot_longer(-c(tool,filter1,conservation_level,total,min_auc,max_auc))%>%
   mutate(name=forcats::fct_recode(name,AUC='AUC50.',Sensitivity='sens',Specificity='spec'))%>%
-  ggplot(aes(x=tool,y=value,color=sub_var_set))+
+  filter(name=='AUC')%>%
+  ggplot(aes(color=conservation_level,y=value,x=tool,ymin=min_auc,ymax=max_auc))+
+  geom_errorbar(color='gray',width=0)+
+  geom_point(size=2)+
+  coord_flip()+
+  theme_minimal()+
+  scale_color_manual(values=c('darkcyan','darkorange','darkred'))+
+  labs(color='Conservation',y='AUC',x=NULL)+
+  theme(legend.position = 'top')
+performance_by_conservation_plot
+
+ggsave(filename = glue('{analysis_folder_name}/performance_by_conservation_plot.{year_to_plot}.{Sys.Date()}.png'),
+       plot=performance_by_conservation_plot,
+       device = 'png',
+       height = 6,
+       width = 9,
+       dpi = 300,bg='white')
+
+# conservation - performance per cons level
+performance_by_conservation_table%>%
+  filter(!is.na(sens))%>%
+  pivot_longer(-c(tool,filter1,conservation_level,total))%>%
+  mutate(name=forcats::fct_recode(name,AUC='AUC50.',Sensitivity='sens',Specificity='spec'))%>%
+  ggplot(aes(x=tool,y=value,color=conservation_level))+
   geom_point(position=position_dodge(width=0.75),size=2)+
   geom_linerange( aes(x=tool, xmin=tool, ymin=0, ymax=value),position=position_dodge(width=c(0.75)))+
   facet_grid(.~name)+
@@ -195,72 +356,185 @@ performance_by_conservation_plot<-
   labs(color='Conservation',x=NULL)+
   theme_minimal()+
   theme(legend.position = 'top')
-performance_by_conservation_plot
-ggsave(filename = glue('{analysis_folder_name}/performance_by_conservation_plot.{Sys.Date()}.png'),
-       plot=performance_by_conservation_plot,
+
+```
+
+# MOI analysis
+
+```{r moi}
+tools_to_test<-top_tools_2023
+time_var_set<-'at_or_after_2023'
+moi_var_sets<-grep('AD|AR|prec|pli',names(var_sets),value = T)
+analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set],var_sets[moi_var_sets])
+moi_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,top_tools_2023,complete=F)
+
+performance_by_moi_table<-
+  moi_analysis_res$roc_metrics_table%>%
+  rename(moi=filter2)%>%
+  #filter(tool %in% tools_to_test)%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  mutate(tool=forcats::fct_reorder(tool,AUC50.))
+write.table(performance_by_moi_table,file=glue('{analysis_folder_name}/performance_by_moi_{time_var_set}_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
+
+# plot the difference between AD and AR
+performance_by_moi_plot<-
+performance_by_moi_table%>%
+  filter(moi%in%c('AD','AR'))%>%select(moi,tool,AUC50.)%>%
+  pivot_wider(id_cols = tool,names_from = moi,values_from = AUC50.)%>%
+  left_join(
+    performance_by_moi_table%>%
+      filter(moi%in%c('prec_high','pli_high'))%>%select(moi,tool,AUC50.)%>%
+      pivot_wider(id_cols = tool,names_from = moi,values_from = AUC50.)
+  )%>%
+  mutate('AD vs AR'=AD-AR,
+         'pLI vs pRec'=pli_high-prec_high,
+         tool=forcats::fct_reorder(tool,desc(`AD vs AR`)))%>%
+  select(tool,`AD vs AR`,`pLI vs pRec`)%>%
+  pivot_longer(-tool)%>%
+  ggplot(aes(y=value,x=tool,color=value>0,fill=value>0))+
+  geom_point(size=3)+
+  geom_col(linewidth=0.1,width = 0.1)+
+  geom_hline(yintercept = 0,linetype=2,color='gray')+
+  facet_grid(.~name)+
+  scale_fill_manual(values=c('darkred','darkgreen'),labels=c('Better perofrmance in AR/pRec','Better performance in AD/pLI'))+
+  scale_color_manual(values=c('darkred','darkgreen'))+
+  coord_flip()+
+  labs(y='AUC difference',fill=NULL,x=NULL)+guides(color='none')+
+  theme_minimal()+theme(strip.text = element_text(face='bold'),legend.position = 'bottom')
+performance_by_moi_plot
+
+ggsave(filename = glue('{analysis_folder_name}/performance_by_moi_plot.{Sys.Date()}.png'),
+       plot=performance_by_moi_plot,
        device = 'png',
        height = 8,
        width = 9,
        dpi = 300,bg='white')
 
+# plot score distribution
+proc_data%>%filter(var_sets[['at_or_after_2023']])%>%
+  select(clinvar_class,moi_gencc,tools_to_test)%>%
+  filter(moi_gencc%in%c('Autosomal dominant','Autosomal recessive'))%>%
+  pivot_longer(-c(clinvar_class,moi_gencc))%>%
+  ggplot(aes(x=value,fill=clinvar_class))+
+  geom_histogram(position='dodge')+
+  facet_wrap(moi_gencc~name,scales='free',ncol = length(tools_to_test))+
+  theme_minimal()
+  #filter(if_any(all_of(tools_to_test), is.na))
+
+# plot with CI
+performance_by_moi_table%>%
+  filter(moi%in%c('AD','AR'))%>%
+  pivot_wider(id_cols = tool,names_from = moi,values_from = c(AUC50.,AUC2.5,AUC97.5))%>%
+  mutate(SE_AD = (AUC97.5_AD - AUC2.5_AD) / (2 * 1.96),
+         SE_AR = (AUC97.5_AR - AUC2.5_AR) / (2 * 1.96)) %>%
+  summarize(
+    mean_diff = AUC50._AD - AUC50._AR,
+    se_diff = sqrt(SE_AD^2 + SE_AR^2),
+    ci_lower = mean_diff - 1.96 * se_diff,
+    ci_upper = mean_diff + 1.96 * se_diff,
+    tool=forcats::fct_reorder(tool,mean_diff)
+  )%>%
+  ggplot(aes(x=tool,y=mean_diff,ymin=ci_lower,ymax=ci_upper))+
+  geom_point()+geom_errorbar()+
+  geom_hline(yintercept = 0,linetype=2)+
+  coord_flip()+
+  theme_minimal()
+```
+
+# Misense constraint 
+consider using the sHet value from Regeneron million exomes (already downloaded in the accessory data)
+
+```{r missense_constraint}
+time_var_set<-'at_or_after_2023'
+mismatchoe_var_sets<-c(grep('mismatch_min_oe_ratio_manual:',names(var_sets),value = T),
+                       'regeneron_constrained','regeneron_not_constrained')
+#mismatchoe_var_sets<-grep('regeneron',names(var_sets),value = T)
+analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set],var_sets[mismatchoe_var_sets])
+mismatchoe_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F)
+
+performance_by_mismatchoe_table<-
+  mismatchoe_analysis_res$roc_metrics_table%>%
+  rename(mismatch_oe=filter2)%>%
+  filter(tool %in% tools_to_test)%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  mutate(tool=forcats::fct_reorder(tool,AUC50.),
+         mismatch_oe=stringr::str_replace(mismatch_oe,'mismatch_min_oe_ratio_manual:','')
+         )
+write.table(performance_by_moi_table,file=glue('{analysis_folder_name}/performance_by_moi_{time_var_set}_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
+
+performance_by_mismatchoe_table%>%
+  filter(!(grepl('regeneron',mismatch_oe)))%>%
+  ggplot(aes(x=mismatch_oe,y=AUC50.,group=tool,ymin=AUC2.5,ymax=AUC97.5))+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(width=0)+
+  facet_wrap(tool~.,scales='free')+
+  theme_minimal()
+
+# analyze results using mixed effects model
+library(nlme)
+model <- lme(AUC50. ~ mismatch_oe,random=~1 | tool, data = performance_by_mismatchoe_table%>%filter(!(grepl('regeneron',mismatch_oe))))
+summary(model)
+plot(model)
+```
+
+# Allele frequency
+
+```{r allele frequency}
+```
+
+
+# Calibration
+
+```{r calibration}
 # calibration plots
 text_size<-10
-proc_data <- proc_data %>%
-  mutate(conservation_status = case_when(
-    sub_var_sets[['low_conservation']] == TRUE ~ "Low",
-    sub_var_sets[['intermediate_conservation']] == TRUE ~ "Intermediate",
-    sub_var_sets[['high_conservation']] == TRUE ~ "High",
-    TRUE ~ NA_character_  # This line handles cases where none of the conditions above are met
-  ))
-
-
 scale_min_max <- function(x) {
   (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
 }
 
-reverse_tools<-c('sift_score.dbnsfp4.5a','fathmm_score.dbnsfp4.5a','provean_score.dbnsfp4.5a','sift4g_score.dbnsfp4.5a')
-
 # data for balance
 balanced_sample_size_per_tool<-
   proc_data %>%
-  select(tools_to_test, clinvar_class, conservation_status) %>%
-  pivot_longer(-c(clinvar_class,conservation_status))%>%
-  filter(!(is.na(value)|is.na(conservation_status))) %>%
-  group_by(name,conservation_status, clinvar_class)%>%
-  count()%>%ungroup()%>%group_by(name,conservation_status)%>%summarize(balanced_n=min(n))
-
+  select(tools_to_test, clinvar_class, cons_cat) %>%
+  pivot_longer(-c(clinvar_class,cons_cat))%>%
+  filter(!(is.na(value)|is.na(cons_cat))) %>%
+  group_by(name,cons_cat, clinvar_class)%>%
+  count()%>%ungroup()%>%group_by(name,cons_cat)%>%summarize(balanced_n=min(n))
 
 proc_data_conservation <- proc_data%>%
-    select(tools_to_test,clinvar_class,conservation_status)%>%
-    mutate(across(all_of(reverse_tools), ~ .x * -1))%>%
+    mutate(across(all_of(intersect(converted_scores,tools_to_test)), ~ .x * -1))%>%
+    select(tools_to_test,clinvar_class,cons_cat)%>%
     mutate(across(all_of(tools_to_test), scale_min_max))%>%
-    filter(!is.na(conservation_status))%>%
-    pivot_longer(cols=-c(clinvar_class,conservation_status))
+    filter(!is.na(cons_cat))%>%
+    pivot_longer(cols=-c(clinvar_class,cons_cat))
 
 balanced_data<-NULL
 for (tool in tools_to_test){
   print(tool)
-  for (conservation in unique(proc_data_conservation$conservation_status)){
+  for (conservation in unique(proc_data_conservation$cons_cat)){
     balanced_data<-balanced_data%>%bind_rows(
       proc_data_conservation%>%filter(name==tool)%>%
-      filter(conservation_status==conservation)%>%
-      slice_sample(n=balanced_sample_size_per_tool%>%filter(name==tool,conservation_status==conservation)%>%pull(balanced_n)))
+      filter(cons_cat==conservation)%>%
+      slice_sample(n=balanced_sample_size_per_tool%>%filter(name==tool,cons_cat==conservation)%>%pull(balanced_n)))
   }
 }
+
+# Calibration by conservation, it looks like mos tools overestimate the pathogenicity of low conservation variants - or putting it differently, for a given score, the probability that a variant in a low conservation region is pathogenic is lower compared to higher conservation levels
 
 calibration_by_conservation_plot<-
 proc_data_conservation%>%
     #mutate(value_cat=cut(value,breaks=c(seq(0,1,0.05)),labels = seq(0.025,0.975,0.05)))%>%
     mutate(value_cat=cut(value,breaks=c(seq(0,1,0.1)),labels = seq(0.05,0.95,0.1)),
            name=stringr::str_replace(name,'_score.+','')%>%toupper())%>%
-    group_by(name,value_cat,conservation_status)%>%
+    group_by(name,value_cat,cons_cat)%>%
     count(clinvar_class)%>%
     mutate(value_cat=as.numeric(as.character(value_cat)),
            total=sum(n),
            rate=n/sum(n))%>%
     filter(clinvar_class=='P/LP')%>%
     mutate(broom::tidy(binom.test(n,total)))%>%
-    ggplot(aes(x=value_cat,y=estimate,color=conservation_status,ymin=conf.low,ymax=conf.high))+
+    ggplot(aes(x=value_cat,y=estimate,color=cons_cat,ymin=conf.low,ymax=conf.high))+
     geom_line()+
     geom_point()+
     facet_wrap(name~.,nrow = 3)+
@@ -281,94 +555,6 @@ ggsave(filename = glue('{analysis_folder_name}/calibration_by_conservation_plot.
 
 
 ```
-
-# MOI analysis
-
-```{r moi}
-performance_by_moi_table<-
-  roc_metrics_table%>%
-  filter(tool %in% tools_to_test)%>%
-  filter(main_var_set=='confident_2020',sub_var_set%in%c('AD','AR'),missing_option=='full')%>%
-  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
-  mutate(tool=forcats::fct_reorder(tool,AUC50.))%>%
-  select(main_var_set,sub_var_set,missing_option,tool,total,AUC50.,sens,spec)
-write.table(performance_by_moi_table,file=glue('{analysis_folder_name}/performance_by_moi_table.{Sys.Date()}.csv'),row.names = F,sep='\t')
-
-# conservation - performance per cons level
-performance_by_moi_plot<-
-  performance_by_moi_table%>%
-  pivot_longer(-c(tool,main_var_set,sub_var_set,missing_option,total))%>%
-  mutate(name=forcats::fct_recode(name,AUC='AUC50.',Sensitivity='sens',Specificity='spec'))%>%
-  ggplot(aes(x=tool,y=value,color=sub_var_set))+
-  geom_point(position=position_dodge(width=0.75),size=2)+
-  geom_linerange( aes(x=tool, xmin=tool, ymin=0, ymax=value),position=position_dodge(width=c(0.75)))+
-  facet_grid(.~name)+
-  coord_flip()+
-  scale_color_nejm()+
-  labs(color='MOI',x=NULL)+
-  theme_minimal()+
-  theme(legend.position = 'top')
-performance_by_moi_plot
-ggsave(filename = glue('{analysis_folder_name}/performance_by_moi_plot.{Sys.Date()}.png'),
-       plot=performance_by_moi_plot,
-       device = 'png',
-       height = 8,
-       width = 9,
-       dpi = 300,bg='white')
-
-# calibration plots
-text_size<-10
-proc_data <- proc_data %>%
-  mutate(moi_status = case_when(
-    sub_var_sets[['AD']] == TRUE ~ "AD",
-    sub_var_sets[['AR']] == TRUE ~ "AR",
-    TRUE ~ NA_character_  # This line handles cases where none of the conditions above are met
-  ))
-
-
-scale_min_max <- function(x) {
-  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
-}
-
-reverse_tools<-c('sift_score.dbnsfp4.5a','fathmm_score.dbnsfp4.5a','provean_score.dbnsfp4.5a','sift4g_score.dbnsfp4.5a')
-
-calibration_by_moi_plot<-
-proc_data%>%
-    select(tools_to_test,clinvar_class,moi_status)%>%
-    mutate(across(all_of(reverse_tools), ~ .x * -1))%>%
-    mutate(across(all_of(tools_to_test), scale_min_max))%>%
-    filter(!is.na(moi_status))%>%
-    pivot_longer(cols=-c(clinvar_class,moi_status))%>%
-    #mutate(value_cat=cut(value,breaks=c(seq(0,1,0.05)),labels = seq(0.025,0.975,0.05)))%>%
-    mutate(value_cat=cut(value,breaks=c(seq(0,1,0.1)),labels = seq(0.05,0.95,0.1)),
-           name=stringr::str_replace(name,'_score.+','')%>%toupper())%>%
-    group_by(name,value_cat,moi_status)%>%
-    count(clinvar_class)%>%
-    mutate(value_cat=as.numeric(as.character(value_cat)),
-           total=sum(n),
-           rate=n/sum(n))%>%
-    filter(clinvar_class=='P/LP')%>%
-    mutate(broom::tidy(binom.test(n,total)))%>%
-    ggplot(aes(x=value_cat,y=estimate,color=moi_status,ymin=conf.low,ymax=conf.high))+
-    geom_line()+
-    geom_point()+
-    facet_wrap(name~.,nrow = 3)+
-    geom_errorbar(width=0.01)+
-    ggsci::scale_color_nejm()+
-    ylim(0,1)+xlim(0,1)+
-    labs(color=NULL,x=NULL,y=NULL)+
-    geom_abline(intercept = 0,slope = 1,linetype=2,alpha=0.5)+
-    theme_minimal()+
-    theme(legend.position='top',text = element_text(size=text_size))
-calibration_by_moi_plot
-ggsave(filename = glue('{analysis_folder_name}/calibration_by_conservation_plot.{Sys.Date()}.png'),
-       plot=calibration_by_conservation_plot,
-       device = 'png',
-       height = 7,
-       width = 14,
-       dpi = 300,bg='white')
-```
-
 
 ```{r }
 z<-
