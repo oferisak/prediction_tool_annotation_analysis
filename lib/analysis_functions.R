@@ -12,6 +12,8 @@ produce_roc<-function(scores_table,tool){
   return(proc)
 }
 
+
+
 combine_filter_sets<-function(var_sets, var_set_names) {
   if (!all(var_set_names %in% names(var_sets))) {
     stop("One or more specified elements do not exist in the list")
@@ -34,7 +36,7 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
     var_set<-proc_data%>%filter(combine_filter_sets(var_sets,row%>%as.character()))
     if (complete){
       original_nrow<-nrow(var_set)
-      var_set<-var_set%>%filter(if_any(all_of(tools_to_test), is.na))
+      var_set<-var_set%>%filter(!if_any(all_of(tools_to_test), is.na))
       complete_nrow<-nrow(var_set)
       message(glue('Out of {original_nrow} variants, {complete_nrow} ({round(complete_nrow/original_nrow,3)}) had values in all of the tools to test'))
     }
@@ -50,13 +52,25 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
       procs[[paste0(c(row%>%as.character(),tool,ifelse(complete,'complete','full')),collapse='|')]]<-proc
       # calculate confusion matrix
       tool_cat<-stringr::str_replace(tool,'_score','_pred')
+      proc_coords<-proc%>%
+        coords(ret='all',transpose=F)
+      percision_at_recall90<-proc_coords%>%
+        select(threshold,precision,recall)%>%
+        slice_min(order_by=abs(0.9-recall),with_ties = F)%>%
+        select(threshold_recall90=threshold,recall90=recall,precision_recall90=precision)
+      percision_at_recall99<-proc_coords%>%
+        select(threshold,precision,recall)%>%
+        slice_min(order_by=abs(0.99-recall),with_ties = F)%>%
+        select(threshold_recall99=threshold,recall99=recall,precision_recall99=precision)
       tool_metrics<-data.frame(row,
                                complete=complete,
                                total=nrow(tool_var_set),
                                tool=tool,
                                data.frame(as.numeric(proc$ci))%>%
                                  mutate(names=c('AUC2.5','AUC50.','AUC97.5'))%>%
-                                 pivot_wider(names_from = names,values_from = as.numeric.proc.ci.))
+                                 pivot_wider(names_from = names,values_from = as.numeric.proc.ci.),
+                               percision_at_recall90,
+                               percision_at_recall99)
       if (tool_cat%in%colnames(var_set)){
         var_set <- var_set %>% mutate(
           #alphamissense_pred.dbnsfp4.5a=ifelse(alphamissense_pred.dbnsfp4.5a=='A',NA,alphamissense_pred.dbnsfp4.5a),

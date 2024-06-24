@@ -5,7 +5,7 @@ load.project()
 # Set Var Sets ####
 # should be ran only after running the preprocessing script or loading the saved preprocessed data table
 ## Definitions ####
-data_folder_name<-'./data/preprocessed_data/2024-05-14/'
+data_folder_name<-'./data/preprocessed_data/2024-06-10/'
 proc_data_file<-grep('processed_data.prediction_tool_annotation',list.files(data_folder_name,full.names = T),value=T)
 proc_data<-readr::read_delim(proc_data_file)
 ### Allele frequency threholds to split on ####
@@ -17,17 +17,11 @@ tools_list<-grep('_score',colnames(proc_data),value = T)
 tools_with_pred<-grep('_pred',colnames(proc_data),value = T)
 
 tools_list<-c(tools_list[which(stringr::str_replace_all(tools_list,'_score','_pred')%in%tools_with_pred)],'revel_score.dbnsfp4.5a')
-high_missingness_tools<-c('eve_score.dbnsfp4.5a',
-                          'mutpred_score.dbnsfp4.5a')         
-
 ## The main var sets ####
 var_sets<-list('all'=rep(TRUE,nrow(proc_data)),
                'high_confidence'=!grepl('criteria_provided,_single_submitter',proc_data$clnrevstat.variant.info))
 
 # missing values filter ####
-# Excluded tools from missingness calc (because they have to few variants)
-var_sets[['no_missing']]<-apply(proc_data[setdiff(tools_list,high_missingness_tools)], 1, function(row) all(!is.na(row)))
-
 var_sets[['AD']]<-grepl('Autosomal dominant',proc_data$moi_gencc)
 var_sets[['AR']]<-grepl('Autosomal recessive',proc_data$moi_gencc)
 

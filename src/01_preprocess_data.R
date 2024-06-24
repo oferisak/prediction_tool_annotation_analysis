@@ -8,9 +8,11 @@ output_folder_name<-glue('./data/preprocessed_data/{Sys.Date()}')
 if (!dir.exists(output_folder_name)){dir.create(output_folder_name)}
 # Load the raw annotated clinvar data exported from VarSeq
 #raw_data<-readr::read_delim('./data/accessory_data/clinvar_annotated_varseq_export.20231213.tsv')
-raw_data<-readr::read_delim('./data/prediction_tools_analysis_hg38_20240502.tsv')
+raw_data<-readr::read_delim('./data/prediction_tools_analysis_hg38_20240610.tsv')
 original_colnames<-colnames(raw_data)
 colnames(raw_data)<-tolower(make.names(original_colnames))
+# add cadd phred to the scores
+raw_data$cadd_phred_score.dbnsfp4.5a<-raw_data$cadd_phred.dbnsfp4.5a
 
 # Definitions ####
 ## dbnsfp score columns ####
@@ -125,12 +127,19 @@ proc_data%>%count(prec_gnomad_cat)
 
 # add gene ontology info
 min_plp_blb_counts<-2000
+
 # add processes
 gene2go_process<-readr::read_delim('/media/SSD/Bioinformatics/Projects/ncbi_utils_2024/output/gene2go_process.csv')
 proc_data<-proc_data%>%left_join(gene2go_process,by=c('gene.names.clinvar.2024.04.04..ncbi'='gene_symbol'))
+# now change every missing value to false (if its missing it means the gene is not in the GO value)
+proc_data<-proc_data%>%mutate(across(all_of(setdiff(colnames(gene2go_process),'gene_symbol')), ~replace_na(., FALSE)))
+
 counts<-NULL
 for (colname in colnames(gene2go_process%>%select(-gene_symbol))){
   print(colname)
+  if (nrow(proc_data%>%filter(!!sym(colname))%>%count(clinvar_class)%>%as.data.frame())==0){
+    counts<-counts%>%bind_rows(data.frame(colname,B.LB=0,P.LP=0))
+  }
   counts<-counts%>%bind_rows(
     data.frame(colname,proc_data%>%filter(!!sym(colname))%>%count(clinvar_class)%>%as.data.frame()%>%pivot_wider(names_from = clinvar_class,values_from = n))
   )
@@ -141,17 +150,91 @@ proc_data<-proc_data%>%select(-low_count_processes)
 # add functions
 gene2go_function<-readr::read_delim('/media/SSD/Bioinformatics/Projects/ncbi_utils_2024/output/gene2go_function.csv')
 proc_data<-proc_data%>%left_join(gene2go_function,by=c('gene.names.clinvar.2024.04.04..ncbi'='gene_symbol'))
+# now change every missing value to false (if its missing it means the gene is not in the GO value)
+proc_data<-proc_data%>%mutate(across(all_of(setdiff(colnames(gene2go_function),'gene_symbol')), ~replace_na(., FALSE)))
 counts<-NULL
 for (colname in colnames(gene2go_function%>%select(-gene_symbol))){
   print(colname)
-  counts<-counts%>%bind_rows(
-    data.frame(colname,proc_data%>%filter(!!sym(colname))%>%count(clinvar_class)%>%as.data.frame()%>%pivot_wider(names_from = clinvar_class,values_from = n))
-  )
+  if (nrow(proc_data%>%filter(!!sym(colname))%>%count(clinvar_class)%>%as.data.frame())==0){
+    counts<-counts%>%bind_rows(data.frame(colname,B.LB=0,P.LP=0))
+  }else{
+    counts<-counts%>%bind_rows(
+      data.frame(colname,proc_data%>%filter(!!sym(colname))%>%count(clinvar_class)%>%as.data.frame()%>%pivot_wider(names_from = clinvar_class,values_from = n))
+    )
+    }
 }
 low_count_functions<-counts%>%filter(B.LB<min_plp_blb_counts | P.LP<min_plp_blb_counts)%>%pull(colname)
 proc_data<-proc_data%>%select(-low_count_functions)
 
+# if you want to remove existing process and functions
+#for(go_proccess in setdiff(colnames(gene2go_process),'gene_symbol')){if(go_proccess%in%colnames(proc_data)){proc_data<-proc_data%>%select(-go_proccess)}}
+#for(go_function in setdiff(colnames(gene2go_function),'gene_symbol')){if(go_function%in%colnames(proc_data)){proc_data<-proc_data%>%select(-go_function)}}
+
+# add primate-ai3d scores (hg38)
+# according to https://primad.basespace.illumina.com/help - 0.8 should be considered the cutoff for pathogenicity
+primateai3d_table<-readr::read_delim('/media/SSD/Bioinformatics/Databases/primateai3d/PrimateAI-3D_scores (1).csv.gz',delim=',')
+primateai3d_table<-primateai3d_table%>%rename(primateai3d_score.dbnsfp4.5a=score_PAI3D,
+                                              reference.variant.info=non_flipped_ref,
+                                              alternates.variant.info=non_flipped_alt)%>%
+  mutate(primateai3d_pred.dbnsfp4.5a=ifelse(primateai3d_score.dbnsfp4.5a>0.8,'D','T'),
+         chr.pos.variant.info=glue('{stringr::str_replace(chr,"chr","")}:{pos}'))
+
+head(primateai3d_table)
+proc_data<-proc_data%>%left_join(primateai3d_table%>%select(chr.pos.variant.info,
+                                                            reference.variant.info,
+                                                            alternates.variant.info,
+                                                            primateai3d_score.dbnsfp4.5a,
+                                                            primateai3d_pred.dbnsfp4.5a))
+
+
+# generate panelapp gene-panel table
+panelapp_raw<-proc_data%>%select(contains('panel.app'))
+panelapp_raw<-panelapp_raw%>%mutate(panel.name.panel.app.genomic.genes.2023.11.01..ge=stringr::str_replace(panel.name.panel.app.genomic.genes.2023.11.01..ge,'von Willebrand','Von Willebrand'),
+                                    panel.name.panel.app.genomic.genes.2023.11.01..ge=stringr::str_replace_all(panel.name.panel.app.genomic.genes.2023.11.01..ge,",(?![A-Z])", ""))
+panelapp_long<-panelapp_raw%>%separate_longer_delim(colnames(panelapp_raw)[1:4],delim = ',')
+# remove all Red associations
+panelapp_long<-panelapp_long%>%
+  rename(gene_symbol=gene.name.panel.app.genomic.genes.2023.11.01..ge,
+         panel_name=panel.name.panel.app.genomic.genes.2023.11.01..ge)%>%
+  filter(!confidence.level.panel.app.genomic.genes.2023.11.01..ge%in%c('Red','No List'))%>%distinct()
+# remove panels that include less than 5 genes
+panel_counts<-panelapp_long%>%select(panel_name,gene_symbol)%>%distinct()%>%
+  count(panel_name)
+excluded_panels<-panel_counts%>%filter(n<10|n>1000)%>%pull(panel_name)
+excluded_panels<-c(excluded_panels,grep('COVID|Additional',panel_counts$panel_name,value = T))
+
+panelapp_wide<-panelapp_long%>%
+  filter(!panel_name%in%excluded_panels)%>%
+  select(gene_symbol,panel_name)%>%
+  mutate(value=TRUE)%>%
+  distinct()%>%
+  pivot_wider(names_from = panel_name,values_from = value,values_fill = list(value=FALSE))
+colnames(panelapp_wide)<-paste0('panelapp:',make.names(colnames(panelapp_wide)))
+colnames(panelapp_wide)[1]<-'gene_symbol'
+proc_data<-proc_data%>%left_join(panelapp_wide,by=c('gene.names.clinvar.2024.04.04..ncbi'='gene_symbol'))
+
+count_clinvar_class <- function(data, panel_names) {
+  result <- NULL
+  
+  for (panel in panel_names) {
+    counts <- data %>%
+      filter(get(panel) == TRUE) %>%
+      group_by(clinvar_class) %>%
+      summarise(count = n()) %>%
+      pivot_wider(names_from = clinvar_class, values_from = count, values_fill = list(count = 0))%>%
+      mutate(panel_name=panel)
+    
+    result <- bind_rows(result, counts)
+  }
+  
+  result[is.na(result)] <- 0
+  return(result)
+}
+# keep only panels that have at least 750 variants for B and for P
+panel_clinvar_counts<-count_clinvar_class(proc_data,panel_names = setdiff(colnames(panelapp_wide),'gene_symbol'))
+panels_to_remove<-panel_clinvar_counts%>%filter(`B/LB`<750 | `P/LP`<750 )%>%pull(panel_name)
+proc_data<-proc_data%>%select(-panels_to_remove)
+
 # save the processed clinvar data
 processed_file_name<-glue('{output_folder_name}/processed_data.prediction_tool_annotation.{Sys.Date()}.tsv')
 write.table(proc_data,file=processed_file_name,sep='\t',row.names = F)
-
