@@ -57,8 +57,10 @@ if (!dir.exists(analysis_folder_name)){
 # Definitions ####
 # the year that will be used for all subsequent analysis
 year_to_analyze<-'at_or_after_2023'
-# the varity_r score is the best out of the varities, eve and mutpred have a high rate of missingness
-excluded_tools<-c('fathmm.xf_coding','esm1b','varity_r_loo','varity_er','varity_er_loo','eve','mutpred','m.cap','mpc','mutationassessor','mvp','lrt') 
+# the varity_r score is the best out of the varities, eve and mutpred,mpc,m.cap have a high rate of missingness. 
+# fitCons, lrt, mvp list.s2 tools have a different missingness pattern than the rest and removing them results in a larger set
+excluded_tools<-c('fathmm.xf_coding','esm1b','varity_r_loo','varity_er','varity_er_loo','eve','mutpred','m.cap','mpc','mutationassessor','lrt','mvp','list.s2','h1.hesc_fitcons','huvec_fitcons','gm12878_fitcons','integrated_fitcons') 
+
 ```
 
 ```{r save_load_data}
@@ -83,17 +85,14 @@ converted_scores<-glue('{converted_scores[!is.na(converted_scores)]}_score.dbnsf
 # Missingness
 ```{r missingness}
 
-excluded_tools<-c('fathmm.xf_coding','esm1b','varity_r_loo','varity_er','varity_er_loo','eve','mutpred','m.cap','mpc','mutationassessor','lrt','mvp','list.s2','h1.hesc_fitcons','huvec_fitcons','gm12878_fitcons','integrated_fitcons') 
-tools_without_excluded<-setdiff(tools_list,paste0(excluded_tools,'_score.dbnsfp4.5a'))
-
-proc_data%>%filter(!if_any(all_of(tools_without_excluded), is.na))%>%nrow()
-
 library(naniar)
 naniar::gg_miss_upset(proc_data%>%select(tools_without_excluded),nsets=20) 
 
-missing_count<-sapply(tools_list,function(tool) {proc_data%>%filter(is.na(!!sym(tool)))%>%nrow()})
+missing_count<-sapply(tools_without_excluded,function(tool) {proc_data%>%filter(is.na(!!sym(tool)))%>%nrow()})
 missing_count<-missing_count%>%as.data.frame()%>%rename(n_missing='.')%>%mutate(missing_rate=n_missing/nrow(proc_data))
 missing_count
+# to get metrics on missingness
+skimr::skim(missing_count$missing_rate)
 
 missing_rate_plot<-
 missing_count%>%
@@ -135,7 +134,7 @@ missing_count_per_year%>%
   geom_col()+
   facet_wrap(tool~.)
 
-skimr::skim(missing_count$missing_rate)
+
 ```
 
 Initial review of the data revealed varying rates of missing values across different scores in the dbNSFP4.5a database (median 0.377 IQR[0.13,0.43]). EVE (0.715) and MutPred (0.634) had the highest missingness rate. In contrast, MutationTaster, FATHMM, DANN, Genocanyon, BayesDel and fitCons all had a missing rate lower than 0.1. 
@@ -146,6 +145,7 @@ collect overall performance for each model
 ```{r rocs}
 # Definitions
 tools_to_test<-tools_without_excluded
+
 #time_var_set<-c('at_or_after_2024')
 time_var_set<-c('at_or_after_2021','at_or_after_2022','at_or_after_2023','at_or_after_2024')
 top_num<-10
@@ -197,30 +197,6 @@ for (var_set in names(rocs_data)){
   )
 }
 
-# ROCs for the complete (no-missing) dataset
-top_tools_complete_roc_plot<-
-plot_roc(raw_roc_table%>%filter(complete=='complete'),
-         overall_performance_table%>%filter(complete=='complete'),
-         top_tools%>%filter(complete=='complete')%>%ungroup(),
-         year_to_analyze)
-# ROCs for the full dataset
-top_tools_full_roc_plot<-
-plot_roc(raw_roc_table%>%filter(complete=='full'),
-         overall_performance_table%>%filter(complete=='full'),
-         top_tools%>%filter(complete=='full')%>%ungroup(),
-         year_to_analyze)
-
-library(patchwork)
-top_models_roc_plot<-(top_tools_complete_roc_plot+labs(title='A'))+(top_tools_full_roc_plot+labs(title='B'))
-top_models_roc_plot
-
-ggsave(filename = glue('{analysis_folder_name}/top_models_roc_plot.{year_to_analyze}.{Sys.Date()}.png'),
-       plot=top_models_roc_plot,
-       device = 'png',
-       height = 7,
-       width = 15,
-       dpi = 300,bg='white')
-
 roc_table<-raw_roc_table%>%
     #filter(tool %in% tools_to_test)%>%
     filter(year==year_to_analyze)%>%
@@ -235,7 +211,7 @@ colors <- setNames(colorRampPalette(c("darkred", "darkcyan", "darkorange",'darkm
 colors["Other"] <- "lightgray" 
 print(colors)
 # Plot the ROC for all the tools and emphasize the top ones
-roc_plot<-
+top_models_roc_plot<-
   roc_table%>%filter(tool_name=='Other')%>%
   ggplot(aes(x=1-specificity,y=sensitivity,color=tool_name,group=tool))+
   facet_wrap(complete~.)+
@@ -246,13 +222,19 @@ roc_plot<-
   theme_minimal()+
   theme(legend.position = 'top')+
   labs(color=NULL)
-print(roc_plot)
-
+print(top_models_roc_plot)
+ggsave(filename = glue('{analysis_folder_name}/top_models_roc_plot.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=top_models_roc_plot,
+       device = 'png',
+       height = 7,
+       width = 10,
+       dpi = 300,bg='white')
 # collect the top tools in BOTH complete and full sets
 top_performing_tools<-top_tools_rank%>%
   #filter(complete=='complete')%>%
   #slice_min(!!sym(year_to_analyze),n=10)%>%
-  pull(tool)%>%stringr::str_replace('_score.+','')%>%toupper()%>%unique()
+  pull(tool)%>%stringr::str_replace('_score.+','')%>%toupper()%>%
+  unique()
 ```
 
 # Variant assertion by year added to clinvar
