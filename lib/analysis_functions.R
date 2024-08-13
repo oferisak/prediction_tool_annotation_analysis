@@ -25,7 +25,7 @@ combine_filter_sets<-function(var_sets, var_set_names) {
   return(result)
 }
 
-calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=TRUE){
+calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=TRUE,save_rocs=TRUE){
   roc_metrics_table<-NULL
   rocs_table<-NULL
   procs<-list()
@@ -41,7 +41,7 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
       message(glue('Out of {original_nrow} variants, {complete_nrow} ({round(complete_nrow/original_nrow,3)}) had values in all of the tools to test'))
     }
     var_set<-var_set%>%mutate(revel_pred.dbnsfp4.5a=ifelse(revel_score.dbnsfp4.5a>0.5,'D','T'))
-    for (tool in tools_list) {
+    for (tool in tools_to_test) {
       #print(tool)
       tool_var_set<-var_set%>%filter(!is.na(!!sym(tool)))
       if(nrow(tool_var_set%>%filter(!is.na(!!sym(tool)))%>%count(clinvar_class))!=2){
@@ -49,11 +49,18 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
         next()
       }
       proc <- suppressMessages(produce_roc(tool_var_set,tool))
-      procs[[paste0(c(row%>%as.character(),tool,ifelse(complete,'complete','full')),collapse='|')]]<-proc
+      if (save_rocs){
+        procs[[paste0(c(row%>%as.character(),tool,ifelse(complete,'complete','full')),collapse='|')]]<-proc
+      }
       # calculate confusion matrix
       tool_cat<-stringr::str_replace(tool,'_score','_pred')
       proc_coords<-proc%>%
         coords(ret='all',transpose=F)
+      recall_at_precision90<-proc_coords%>%
+        select(threshold,precision,recall)%>%
+        slice_min(order_by=abs(0.9-precision),with_ties = F)%>%
+        select(threshold_ppv90=threshold,precision90=precision,recall_precision90=recall)
+      
       percision_at_recall90<-proc_coords%>%
         select(threshold,precision,recall)%>%
         slice_min(order_by=abs(0.9-recall),with_ties = F)%>%
@@ -69,6 +76,7 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
                                data.frame(as.numeric(proc$ci))%>%
                                  mutate(names=c('AUC2.5','AUC50.','AUC97.5'))%>%
                                  pivot_wider(names_from = names,values_from = as.numeric.proc.ci.),
+                               recall_at_precision90,
                                percision_at_recall90,
                                percision_at_recall99)
       if (tool_cat%in%colnames(var_set)){

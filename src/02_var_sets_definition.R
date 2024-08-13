@@ -40,12 +40,11 @@ var_sets[['af_unknown']]<-is.na(proc_data%>%pull(af_col))
 for (af_thresh in af_threshs){
   var_sets[[glue('af_above_{af_thresh}')]]<-(!is.na(proc_data%>%pull(af_col)))&(proc_data%>%pull(af_col)>af_thresh)
 }
-
 ### Allele frequency cat ####
-proc_data<-proc_data%>%mutate(af_cat=Hmisc::cut2(proc_data%>%pull(af_col),g = 5))
+proc_data<-proc_data%>%mutate(af_cat=cut(proc_data%>%pull(af_col),breaks = c(1,0.001,1e-4,1e-5,1e-6,0)))
 proc_data%>%count(af_cat)
 
-var_sets[[glue('af_cat_NA')]]<-is.na(proc_data$af_cat)
+var_sets[[glue('af_cat_unknown')]]<-is.na(proc_data$af_cat)
 for (af_level in levels(proc_data$af_cat)){
   var_sets[[glue('af_cat_{af_level}')]]<-(!is.na(proc_data$af_cat)) & proc_data$af_cat==af_level
 }
