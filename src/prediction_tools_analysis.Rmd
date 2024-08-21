@@ -12,10 +12,17 @@ params:
   clinvar_am_annotated_file: ''
 ---
 
+# Prompt
+i have a dataset called tool_var_set of variants classified as either P/LP ir B/LB. the ratio between the variant types is different from the real ratio pop_ratio (approximately 0.5 P/LP instead of 0.04 P/LP). i also have nested subgroups of the dataset corresponding to different conditions, in each dataset the ratio between the variant types changes (and the expected pop_ratio could also be different - but is unknown). for each nested dataset, i would like to adjust the pop_ratio to correspond to the dataset. i also have a classification model score for each variant (not necessarily between 0 and 1). using bayesian methods i want to calculate for each dataset and its corresponding prior ratio, and the real known population pop_ratio the probability of a variant being P/LP given the score. lets use r to do so. 
+
 # Comments:
 - went over the missing values for the different tools - they are really missing.. 
 
 # TODO : 
+
+- implemented posterior prob calculation. need to update it so that the get_density function supports inverted scores.
+- calculate the thresholds corresponding to the posterior likelihoods described in https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9748256/table/tbl1/- added calibration tables to the calculation, consider reporting the results for the complete 2023 set and for each sub dataset (different thresholds per dataset)
+
 - in the panelapp analysis, check the date created per panel (perhaps better performing panels are more represented)
 - check the gene content in the significantly under/overperforming subsets
 - add features detailed in https://www.nature.com/articles/s41588-024-01821-8 and associate them with performance
@@ -43,7 +50,7 @@ becnchmarking analysis - phenotype based - https://www.ncbi.nlm.nih.gov/pmc/arti
 
 ```{r load_project}
 # if you want to load a preexisting project just define the folder name
-analysis_folder_name<-'./output/prediction_tools_analysis.2024-06-25'
+#analysis_folder_name<-'./output/prediction_tools_analysis.2024-06-25'
 ```
 
 ```{r markdown_setup,include=FALSE}
