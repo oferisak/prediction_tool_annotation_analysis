@@ -112,15 +112,28 @@ calculate_calibration_df<-function(tool_var_set,tool,breaks=10,hmisc=FALSE,prior
   return(to_ret)
 }
 
+adaptive_density <- function(score, density_object) {
+  eval.points <- score
+  density_value <- predict(density_object, x = eval.points)
+  return(density_value)
+}
+
 
 # claude solution for posterior prob calculation
-calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio) {
+calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,bw_method) {
   # Ensure labels are factor
   labels <- factor(labels, levels = c("P/LP", "B/LB"))
   
   # Calculate likelihoods
-  density_plp <- density(scores[labels == "P/LP"])
-  density_blb <- density(scores[labels == "B/LB"])
+  density_plp <- density(scores[labels == "P/LP"],bw = bw_method)
+  #max_plp_dens<-max(density_plp$y)
+  density_blb <- density(scores[labels == "B/LB"],bw = bw_method)
+  # if the score is overly dispersed, return NA
+  if (sd(density_plp$y)>50){
+    message(glue('Score is overly dispersed, will skip posterior probability calculation'))
+    return(c())}
+  #max_blb_dens<-density_blb$y[which.max(density_plp$y)]
+  #print(glue('max plp {max_plp_dens}, plp sd is {sd(density_plp$y)}, IQR is {IQR(density_plp$y)}'))
   
   # Function to get density at a specific point
   get_density <- function(x, d) {
@@ -132,6 +145,12 @@ calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio) 
   posterior_probs <- sapply(scores, function(score) {
     likelihood_plp <- get_density(score, density_plp)
     likelihood_blb <- get_density(score, density_blb)
+    
+    # likelihood_PLP <- approx(density_plp$x, density_plp$y, xout = score)$y
+    # likelihood_BLB <- approx(density_blb$x, density_blb$y, xout = score)$y
+    
+    # likelihood_plp <- adaptive_density(score, density_plp)
+    # likelihood_blb <- adaptive_density(score, density_blb)
     
     # Using dataset_ratio as prior
     prior_plp <- dataset_ratio
@@ -150,32 +169,77 @@ calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio) 
   return(posterior_probs)
 }
 
-calculate_dataset_posterior_prob<-function(tool_var_set,tool,original_dataset_ratio,pop_ratio=0.0441){
+# the dataset ratio should not be based on the tool's ratio but rather the P/B ratio in the complete var set regardless of each score's missingness
+# converted tool - whether the tools scores are converted (lower scores are more likely to be pathogenic)
+calculate_dataset_posterior_prob<-function(tool_var_set,
+                                           tool,
+                                           dataset_ratio,
+                                           original_dataset_ratio,
+                                           pop_ratio=0.0441,
+                                           converted_tool=FALSE,
+                                           bw_method='nrd0'){
   data <- tool_var_set
   
   # Calculate dataset-specific ratio
-  dataset_ratio <- mean(data$clinvar_class == "P/LP")
+  #dataset_ratio <- mean(data$clinvar_class == "P/LP")
   
   # adjust pop_ratio according to the dataset ratio 
   adjusted_pop_ratio<- pop_ratio * (dataset_ratio/original_dataset_ratio)
-  print(adjusted_pop_ratio)
+  #print(adjusted_pop_ratio)
   
   probabilities <- calculate_plp_probability(
     data%>%pull(tool), 
     data%>%pull(clinvar_class), 
     dataset_ratio, 
-    adjusted_pop_ratio
+    adjusted_pop_ratio,
+    bw_method
   )
+  # if score overly dispresed, plp will return NA
+  if (length(probabilities)==0){return(data.frame(tool=tool))}
   criteria<-cut(probabilities,breaks=c(0.0999,0.2108,0.6073,0.9811,1),labels=c('P','M','S','VS'))
-  return(data.frame(tool,score=data%>%pull(tool),post_prob = probabilities,criteria))
+  posterior_prob_df<-data.frame(tool,
+                                score=data%>%pull(tool),
+                                post_prob = probabilities,
+                                criteria,
+                                clinvar_class=tool_var_set$clinvar_class)
+  if(converted_tool){
+    posterior_prob_df_by_criteria<-posterior_prob_df%>%
+      group_by(criteria)%>%
+      slice_max(score,with_ties = F)
+  }else{
+    posterior_prob_df_by_criteria<-posterior_prob_df%>%
+      group_by(criteria)%>%
+      slice_min(score,with_ties = F)
+  }
+  posterior_prob_df_by_criteria<-posterior_prob_df_by_criteria%>%
+    select(-clinvar_class)%>%
+    left_join(posterior_prob_df%>%count(criteria,clinvar_class)%>%
+                mutate(clinvar_class=make.names(clinvar_class))%>%
+                group_by(criteria)%>%mutate(total=sum(n))%>%ungroup()%>%
+                pivot_wider(names_from = clinvar_class,values_from = n))%>%
+    ungroup()%>%
+    filter(!is.na(criteria))
+  if (nrow(posterior_prob_df_by_criteria)==0){
+    message('Tool did not reach minimal posterior prob for supporting criteria, skipping..')
+    return(data.frame(tool=tool))
+  }
+  return(posterior_prob_df_by_criteria)
 }
-z<-calculate_dataset_posterior_prob(tool_var_set,tool,original_dataset_ratio,pop_ratio = 0.0441)
-z%>%group_by(criteria)%>%slice_min(score,with_ties = F)
-z%>%count(criteria)
 
-calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=TRUE,save_rocs=TRUE){
+
+# calculate_dataset_posterior_prob(tool_var_set,
+#                                  tool,dataset_ratio = dataset_ratio,
+#                                  original_dataset_ratio = original_dataset_ratio,
+#                                  converted_tool=FALSE,bw_method = 'nrd0')
+
+calculate_roc_metrics<-function(proc_data,var_sets_list,
+                                tools_to_test,
+                                converted_scores,
+                                complete=TRUE,save_rocs=TRUE,
+                                calculate_posterior_probs=FALSE){
   roc_metrics_table<-NULL
   rocs_table<-NULL
+  posterior_probs<-NULL
   procs<-list()
   original_dataset_ratio<-mean(proc_data$clinvar_class=='P/LP',na.rm = T)
   for (i in 1:nrow(var_sets_list)){
@@ -190,13 +254,41 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
       message(glue('Out of {original_nrow} variants, {complete_nrow} ({round(complete_nrow/original_nrow,3)}) had values in all of the tools to test'))
     }
     var_set<-var_set%>%mutate(revel_pred.dbnsfp4.5a=ifelse(revel_score.dbnsfp4.5a>0.5,'D','T'))
+    var_set_n_plp<-sum(var_set$clinvar_class=='P/LP',na.rm = T)
+    dataset_ratio<-mean(var_set$clinvar_class=='P/LP',na.rm = T)
+    message(glue('With {var_set_n_plp} pathogenic variants, the P/B ratio in the {paste0(row%>%slice(1),collapse=":")} dataset is {dataset_ratio}'))
+    cat('\n')
     for (tool in tools_to_test) {
-      #print(tool)
+      cat(sprintf("\rAnalyzing %s",tool))
       tool_var_set<-var_set%>%filter(!is.na(!!sym(tool)))
       if(nrow(tool_var_set%>%filter(!is.na(!!sym(tool)))%>%count(clinvar_class))!=2){
         message(glue('There werent enough cases/controls for {tool}'))
         next()
       }
+      # calculate posterior probs
+      if (calculate_posterior_probs){
+        converted_tool<-ifelse(tool %in% converted_scores,TRUE,FALSE)
+        tool_posterior_probs<-suppressMessages(calculate_dataset_posterior_prob(tool_var_set,
+                                                               tool,
+                                                               dataset_ratio,
+                                                               original_dataset_ratio,
+                                                               pop_ratio=0.0441,
+                                                               converted_tool,bw_method = 'nrd0'))
+        if ('P.LP' %in% colnames(tool_posterior_probs)){
+          tool_posterior_probs<-tool_posterior_probs%>%
+            mutate(sensitivity=P.LP/var_set_n_plp)
+        }
+        posterior_probs<-posterior_probs%>%bind_rows(
+          data.frame(
+            row,
+            complete=complete,
+            total=nrow(tool_var_set),
+            tool_posterior_probs
+          )
+        )
+      }
+      
+      # calculate roc metrics
       proc <- suppressMessages(produce_roc(tool_var_set,tool))
       if (save_rocs){
         procs[[paste0(c(row%>%as.character(),tool,ifelse(complete,'complete','full')),collapse='|')]]<-proc
@@ -255,11 +347,11 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,tools_to_test,complete=T
       }
       roc_metrics_table<-roc_metrics_table%>%bind_rows(tool_metrics)
     }
+    cat("\n")
     to_ret<-list()
     to_ret[['procs']]<-procs
     to_ret[['roc_metrics_table']]<-roc_metrics_table
-    to_ret[['calibration_df']]<-calculate_calibration_df(tool_var_set,tool,breaks=10)
-    to_ret[['calibration_df_hmisc']]<-calculate_calibration_df(tool_var_set,tool,breaks=10,hmisc = TRUE)
+    to_ret[['posterior_prob']]<-posterior_probs
   }
   return(to_ret)
 }

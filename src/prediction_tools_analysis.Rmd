@@ -13,7 +13,7 @@ params:
 ---
 
 # Prompt
-i have a dataset called tool_var_set of variants classified as either P/LP ir B/LB. the ratio between the variant types is different from the real ratio pop_ratio (approximately 0.5 P/LP instead of 0.04 P/LP). i also have nested subgroups of the dataset corresponding to different conditions, in each dataset the ratio between the variant types changes (and the expected pop_ratio could also be different - but is unknown). for each nested dataset, i would like to adjust the pop_ratio to correspond to the dataset. i also have a classification model score for each variant (not necessarily between 0 and 1). using bayesian methods i want to calculate for each dataset and its corresponding prior ratio, and the real known population pop_ratio the probability of a variant being P/LP given the score. lets use r to do so. 
+i have a dataset called tool_var_set of variants classified as either P/LP ir B/LB. the ratio between the variant types is different from the real ratio pop_ratio (approximately 0.5 P/LP instead of 0.04 P/LP). i also have nested subgroups of the dataset corresponding to different conditions, in each dataset the ratio between the variant types changes (and the expected pop_ratio ould also be different). i also have a classification model score for each variant (not necessarily between 0 and 1). using bayesian methods i want to calculate for each dataset and its corresponding prior ratio, and the real known population pop_ratio the probability of a variant being P/LP given the score. lets use r to do so. 
 
 # Comments:
 - went over the missing values for the different tools - they are really missing.. 
@@ -108,15 +108,23 @@ collect overall performance for each model
 ```{r rocs}
 # Definitions
 tools_to_test<-tools_without_excluded
-
+#time_var_set<-c('at_or_after_2021')
 time_var_set<-c('at_or_after_2021','at_or_after_2022','at_or_after_2023','at_or_after_2024')
 top_num<-10
 
 analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set])
 # overall performance for the complete var set - no missing data for any of the tools
-overall_performance_complete_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_without_excluded,complete = T)
+overall_performance_complete_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,
+                                                                 tools_without_excluded,complete = T,
+                                                                 converted_scores = converted_scores,
+                                                                 calculate_posterior_probs = FALSE)
 # overall perforamnce for the full var set - the performance of each tool on all of it's annotated variants
-overall_performance_full_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_without_excluded,complete = F)
+overall_performance_full_analysis_res<-calculate_roc_metrics(proc_data,
+                                                             analysis_var_sets,
+                                                             complete =FALSE,
+                                                             tools_without_excluded,complete = F,
+                                                             converted_scores = converted_scores,
+                                                             calculate_posterior_probs = TRUE)
 
 rocs_data<-c(overall_performance_complete_analysis_res$procs,overall_performance_full_analysis_res$procs)
 overall_performance_table<-overall_performance_complete_analysis_res$roc_metrics_table%>%
@@ -412,8 +420,7 @@ conservation_var_sets<-grep('conserv',names(var_sets),value = T)
 analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_sets[conservation_var_sets])
 
 # get the overall performance for variants with conservation scores
-var_sets[['all_conservation']]<-!is.na()
-all_panelapp_analysis_res<-calculate_roc_metrics(proc_data,data.frame(filter1=year_to_analyze,filter2='all_panelapp'),tools_to_test,complete = F,save_rocs=F)
+all_conservation_analysis_res<-calculate_roc_metrics(proc_data,data.frame(filter1=year_to_analyze,filter2='all_conservation'),tools_to_test,complete = F,save_rocs=F)
 
 performance_by_conservation_table<-
   conservation_analysis_res$roc_metrics_table%>%
@@ -528,6 +535,7 @@ analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_s
 
 # for inter tool comparison
 conservation_analysis_res_complete<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = T,save_rocs = F)
+conservation_analysis_res_full<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F,save_rocs = F,converted_scores=converted_scores,calculate_posterior_probs = T)
 
 performance_by_conservation_table_complete<-
   conservation_analysis_res_complete$roc_metrics_table%>%
