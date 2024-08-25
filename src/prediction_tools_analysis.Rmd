@@ -20,7 +20,6 @@ i have a dataset called tool_var_set of variants classified as either P/LP ir B/
 
 # TODO : 
 
-- implemented posterior prob calculation. need to update it so that the get_density function supports inverted scores.
 - calculate the thresholds corresponding to the posterior likelihoods described in https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9748256/table/tbl1/- added calibration tables to the calculation, consider reporting the results for the complete 2023 set and for each sub dataset (different thresholds per dataset)
 
 - in the panelapp analysis, check the date created per panel (perhaps better performing panels are more represented)
@@ -121,7 +120,6 @@ overall_performance_complete_analysis_res<-calculate_roc_metrics(proc_data,analy
 # overall perforamnce for the full var set - the performance of each tool on all of it's annotated variants
 overall_performance_full_analysis_res<-calculate_roc_metrics(proc_data,
                                                              analysis_var_sets,
-                                                             complete =FALSE,
                                                              tools_without_excluded,complete = F,
                                                              converted_scores = converted_scores,
                                                              calculate_posterior_probs = TRUE)
@@ -211,7 +209,6 @@ top_performing_tools_original_names<-top_tools_rank%>%pull(tool)%>%unique()
 # info on top performing tools for the manuscript
 for_text<-overall_performance_table%>%filter(filter1=='at_or_after_2023',grepl('bayes|metarnn|clinpred',tool),complete=='complete')%>%select(contains(c('tool','AUC','precision90')))
 
-
 # Extract necessary data
 metaRNN <- for_text %>% filter(tool == "metarnn_score.dbnsfp4.5a")
 bayesDel <- for_text %>% filter(tool == "bayesdel_addaf_score.dbnsfp4.5a")
@@ -230,6 +227,16 @@ paragraph <- sprintf(
 
 # Print the paragraph
 cat(paragraph)
+
+# score thresholds calculations - should be performed using the full dataset (per tool)
+overall_score_thresholds<-
+overall_performance_full_analysis_res$posterior_prob%>%
+  filter(filter1==year_to_analyze)%>%
+  filter(tool%in%top_performing_tools_original_names)%>%
+  filter(sensitivity>0.005)%>%
+  select(tool,score,criteria)%>%
+  pivot_wider(names_from = criteria,values_from = score)
+write.table(overall_score_thresholds,file=glue('{analysis_folder_name}/overall_performance.posterior_prob.{Sys.Date()}.csv'),row.names = F,sep='\t')
 ```
 
 # Missingness
@@ -306,8 +313,10 @@ tools_with_pub_year<-readxl::read_xlsx('./data/accessory_data/tools_list.xlsx')
 analysis_var_sets<-generate_var_set_combinations(var_sets['all'],var_sets[c(as.character(2013:2024))])
 rocs_analysis_results<-calculate_roc_metrics(proc_data,
                                              analysis_var_sets,
-                                             tools_without_exclusion,
-                                             complete=F)
+                                             tools_without_excluded,
+                                             complete=F,
+                                             calculate_posterior_probs = F,
+                                             save_rocs = F)
 
 if (length(excluded_tools)>0){
   tools_to_test<-grep(paste0('^',excluded_tools,'_score',collapse='|'),unique(rocs_analysis_results$roc_metrics_table$tool),value = T,invert = T)
@@ -408,7 +417,7 @@ lm_by_training_year<-
   group_by(tool) %>%
   do(tidy(lm(AUC50. ~ before_training, data = .)))%>%
   filter(term=='before_trainingafter_training')
-
+lm_by_training_year
 
 ```
 
@@ -418,9 +427,24 @@ lm_by_training_year<-
 ```{r conservation_effec_overall}
 conservation_var_sets<-grep('conserv',names(var_sets),value = T)
 analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_sets[conservation_var_sets])
+var_sets$all_conservation <- rowSums(sapply(conservation_var_sets, function(v) !is.na(var_sets[[v]]))) > 0
 
 # get the overall performance for variants with conservation scores
-all_conservation_analysis_res<-calculate_roc_metrics(proc_data,data.frame(filter1=year_to_analyze,filter2='all_conservation'),tools_to_test,complete = F,save_rocs=F)
+all_conservation_analysis_res<-calculate_roc_metrics(proc_data,
+                                                     data.frame(filter1=year_to_analyze,filter2='all_conservation'),
+                                                     tools_to_test,
+                                                     complete = F,
+                                                     save_rocs=F,
+                                                     calculate_posterior_probs = TRUE,
+                                                     converted_scores = converted_scores)
+conservation_analysis_res<-calculate_roc_metrics(proc_data,
+                                                     analysis_var_sets,
+                                                     tools_to_test,
+                                                     complete = F,
+                                                     save_rocs=F,
+                                                     calculate_posterior_probs = TRUE,
+                                                     converted_scores = converted_scores)
+
 
 performance_by_conservation_table<-
   conservation_analysis_res$roc_metrics_table%>%
@@ -433,7 +457,8 @@ performance_by_conservation_table<-
 
 # add overall performance
 performance_by_conservation_table<-performance_by_conservation_table%>%left_join(
-  overall_performance_table%>%filter(filter1==year_to_analyze,complete=='full')%>%
+  all_conservation_analysis_res$roc_metrics_table%>%
+    mutate(complete=ifelse(complete,'complete','full'))%>%filter(filter1==year_to_analyze,complete=='full')%>%
     mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
     select(filter1,tool,overall_total=total,overall_AUC50=AUC50.,overall_sens=sens,overall_spec=spec)
 )
@@ -512,20 +537,21 @@ ggsave(filename = glue('{analysis_folder_name}/performance_by_conservation_plot.
        width = 10,
        dpi = 300,bg='white')
 
+# posterior probabilities
+conservation_score_thresholds<-conservation_analysis_res$posterior_prob%>%
+  filter(tool%in%top_performing_tools_original_names)%>%
+  filter(sensitivity>0.005)
 
-# a second plot option.. 
-g<-conservation_to_plot%>%
-  ggplot(aes(color=conservation_level,y=value,x=name,ymin=min_val,ymax=max_val))+
-  geom_errorbar(color='gray',width=0)+
-  geom_point(size=2)+
-  coord_flip()+
-  facet_grid(tool~.,space='free',scales='free',switch = 'both',labeller = label_wrap_gen(width = 6))+
-  theme_minimal()+
-  scale_color_manual(values=c('darkcyan','darkorange','darkred'))+
-  theme(legend.position = 'bottom',strip.placement = 'outside',strip.text.y.left = element_text(angle=0,face = 'bold'))+
-  geom_vline(xintercept = 0.4,alpha=0.75)+theme(panel.spacing = unit(0, "lines"))
-g
-
+conservation_score_thresholds%>%
+  mutate(filter2=stringr::str_replace(filter2,'_conservation',''))%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  ggplot(aes(x=factor(filter2, levels = rev(levels(factor(filter2)))),
+             color=criteria,y=score))+
+  geom_point(shape=3,size=2.5,stroke=2.5)+
+  PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
+  facet_wrap(tool~.,scales='free_y')+
+  theme_minimal()+theme(legend.position = 'top')+
+  labs(x='Conservation',y='Score',color='Criteria')
 ```
 
 ## Comparions
