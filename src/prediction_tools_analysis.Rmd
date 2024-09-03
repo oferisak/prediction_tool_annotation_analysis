@@ -20,6 +20,7 @@ i have a dataset called tool_var_set of variants classified as either P/LP ir B/
 
 # TODO : 
 
+- review the panelapp analysis - i think all the variants should either be TRUE or FALSE for each panel (currently there are NAs)
 - calculate the thresholds corresponding to the posterior likelihoods described in https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9748256/table/tbl1/- added calibration tables to the calculation, consider reporting the results for the complete 2023 set and for each sub dataset (different thresholds per dataset)
 
 - in the panelapp analysis, check the date created per panel (perhaps better performing panels are more represented)
@@ -49,7 +50,7 @@ becnchmarking analysis - phenotype based - https://www.ncbi.nlm.nih.gov/pmc/arti
 
 ```{r load_project}
 # if you want to load a preexisting project just define the folder name
-#analysis_folder_name<-'./output/prediction_tools_analysis.2024-06-25'
+analysis_folder_name<-'./output/prediction_tools_analysis.2024-09-02'
 ```
 
 ```{r markdown_setup,include=FALSE}
@@ -107,7 +108,7 @@ collect overall performance for each model
 ```{r rocs}
 # Definitions
 tools_to_test<-tools_without_excluded
-#time_var_set<-c('at_or_after_2021')
+#time_var_set<-c('at_or_after_2023')
 time_var_set<-c('at_or_after_2021','at_or_after_2022','at_or_after_2023','at_or_after_2024')
 top_num<-10
 
@@ -542,16 +543,24 @@ conservation_score_thresholds<-conservation_analysis_res$posterior_prob%>%
   filter(tool%in%top_performing_tools_original_names)%>%
   filter(sensitivity>0.005)
 
+conservation_score_thresholds_plot<-
 conservation_score_thresholds%>%
   mutate(filter2=stringr::str_replace(filter2,'_conservation',''))%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   ggplot(aes(x=factor(filter2, levels = rev(levels(factor(filter2)))),
              color=criteria,y=score))+
-  geom_point(shape=3,size=2.5,stroke=2.5)+
+  geom_point(shape=3,size=2.5,stroke=2)+
   PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
   facet_wrap(tool~.,scales='free_y')+
   theme_minimal()+theme(legend.position = 'top')+
   labs(x='Conservation',y='Score',color='Criteria')
+conservation_score_thresholds_plot
+ggsave(filename = glue('{analysis_folder_name}/conservation_score_thresholds_plot.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=conservation_score_thresholds_plot,
+       device = 'png',
+       height = 10,
+       width = 10,
+       dpi = 300,bg='white')
 ```
 
 ## Comparions
@@ -560,12 +569,12 @@ conservation_var_sets<-grep('conserv',names(var_sets),value = T)
 analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_sets[conservation_var_sets])
 
 # for inter tool comparison
-conservation_analysis_res_complete<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = T,save_rocs = F)
-conservation_analysis_res_full<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F,save_rocs = F,converted_scores=converted_scores,calculate_posterior_probs = T)
+conservation_analysis_res_complete<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = T,save_rocs = F,calculate_posterior_probs = F)
 
 performance_by_conservation_table_complete<-
   conservation_analysis_res_complete$roc_metrics_table%>%
   filter(tool %in% tools_to_test)%>%
+  filter(filter2!='all_conservation')%>%
   rename(conservation_level=filter2)%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   mutate(tool=forcats::fct_reorder(tool,AUC50.),
@@ -609,11 +618,24 @@ ggsave(filename = glue('{analysis_folder_name}/performance_by_conservation_bump_
 
 ## Overall comparison
 ```{r moi}
+
+proc_data%>%
+  mutate(moi_gencc=case_when(
+           moi_gencc=='Autosomal dominant'~'AD',
+           moi_gencc=='Autosomal recessive'~'AR',
+           moi_gencc=='X-linked'~'XL',
+           .default='Unknown'))%>%
+  count(moi_gencc)%>%
+  mutate(rate=n/sum(n))%>%
+  arrange(desc(rate))
+
 tools_to_test<-tools_without_excluded
 #tools_to_test<-top_tools_2023
-moi_var_sets<-grep('AD|AR|prec|pli',names(var_sets),value = T)
+moi_var_sets<-grep('AD|AR|XL|prec|pli',names(var_sets),value = T)
 analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_sets[moi_var_sets])
-moi_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete=F,save_rocs = F)
+moi_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete=F,
+                                        save_rocs = F,converted_scores = converted_scores,
+                                        calculate_posterior_probs = T)
 
 performance_by_moi_table<-
   moi_analysis_res$roc_metrics_table%>%
@@ -660,6 +682,44 @@ ggsave(filename = glue('{analysis_folder_name}/performance_by_moi_plot.{Sys.Date
        width = 9,
        dpi = 300,bg='white')
 
+
+moi_to_plot<-
+performance_by_moi_table%>%
+  filter(!is.na(sens))%>%filter(tool %in% top_performing_tools)%>%filter(moi%in%c('AD','AR','XL'))%>%
+  pivot_longer(-c(tool,filter1,moi,total,complete))%>%
+  mutate(name=forcats::fct_recode(name,AUC='AUC50.',Sensitivity='sens',Specificity='spec'))%>%
+  filter(name%in%c('AUC','Sensitivity','Specificity'))%>%
+  #filter(name%in%c('AUC'))%>%
+  left_join(
+    performance_by_moi_table%>%
+    filter(!is.na(sens))%>%filter(tool %in% top_performing_tools)%>%filter(moi%in%c('AD','AR','XL'))%>%
+    pivot_longer(-c(tool,filter1,moi,total,complete))%>%
+    mutate(name=forcats::fct_recode(name,AUC='AUC50.',Sensitivity='sens',Specificity='spec'))%>%
+    filter(name%in%c('AUC','Sensitivity','Specificity'))%>%
+    #filter(name%in%c('AUC'))%>%
+    group_by(tool,name)%>%
+      summarize(min_val=min(value),max_val=max(value))%>%ungroup()
+  )
+
+performance_by_moi_plot<-
+  moi_to_plot%>%
+  ggplot(aes(color=moi,y=value,x=tool,ymin=min_val,ymax=max_val))+
+  geom_errorbar(color='gray',width=0)+
+  geom_point(size=3)+
+  facet_grid(.~name,scales='free_x')+
+  coord_flip()+
+  theme_minimal()+
+  PrettyCols::scale_color_pretty_d(palette = 'Autumn',scale_name='Autumn')+
+  labs(color='MOI',x=NULL,shape=NULL,y=NULL)+
+  theme(legend.position = 'top',strip.text = element_text(face='bold'))
+performance_by_moi_plot
+ggsave(filename = glue('{analysis_folder_name}/performance_by_moi_plot.{Sys.Date()}.png'),
+       plot=performance_by_moi_plot,
+       device = 'png',
+       height = 10,
+       width = 9,
+       dpi = 300,bg='white')
+
 library(nlme)
 # discriminatory performance using all the tools AD vs AR
 moi_auc_model_ad_vs_ar <- lme(AUC50. ~ moi,random=~1 | tool, data = performance_by_moi_table%>%filter(moi%in%c('AD','AR')))
@@ -673,6 +733,30 @@ moi_sens_model<-lme(sens ~ moi,random=~1 | tool, data = performance_by_moi_table
 summary(moi_sens_model)
 moi_spec_model<-lme(spec ~ moi,random=~1 | tool, data = performance_by_moi_table%>%filter(moi%in%c('AD','AR'))%>%filter(!is.na(spec)))
 summary(moi_spec_model)
+
+# posterior probabilities
+moi_score_thresholds<-moi_analysis_res$posterior_prob%>%
+  filter(tool%in%top_performing_tools_original_names)%>%
+  filter(sensitivity>0.005)
+
+moi_score_thresholds_plot<-
+moi_score_thresholds%>%
+  filter(filter2%in%c('AD','AR','XL'))%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  ggplot(aes(x=factor(filter2, levels = rev(levels(factor(filter2)))),
+             color=criteria,y=score))+
+  geom_point(shape=3,size=2.5,stroke=2)+
+  PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
+  facet_wrap(tool~.,scales='free_y')+
+  theme_minimal()+theme(legend.position = 'top')+
+  labs(x='Mode of Inheritance',y='Score',color='Criteria')
+moi_score_thresholds_plot
+ggsave(filename = glue('{analysis_folder_name}/moi_score_thresholds_plot.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=moi_score_thresholds_plot,
+       device = 'png',
+       height = 10,
+       width = 10,
+       dpi = 300,bg='white')
 
 # plot with CI
 # performance_by_moi_table%>%
@@ -696,16 +780,17 @@ summary(moi_spec_model)
 # ran the comparison with the complete set, no real insights
 ```
 
-
 # Misense constraint 
 
 ```{r missense_constraint}
 time_var_set<-'at_or_after_2023'
-af_var_sets<-c(grep('mismatch_min_oe_ratio:',names(var_sets),value = T),
+mismatchoe_vars<-c(grep('mismatch_min_oe_ratio:',names(var_sets),value = T),
                        'regeneron_constrained','regeneron_not_constrained')
 #af_var_sets<-grep('regeneron',names(var_sets),value = T)
-analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set],var_sets[mismatchoe_var_sets])
-mismatchoe_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F,save_rocs = F)
+analysis_var_sets<-generate_var_set_combinations(var_sets[time_var_set],var_sets[mismatchoe_vars])
+mismatchoe_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,
+                                               complete = F,save_rocs = F,converted_scores = converted_scores,
+                                               calculate_posterior_probs = T)
 
 performance_by_mismatchoe_table<-
   mismatchoe_analysis_res$roc_metrics_table%>%
@@ -763,6 +848,33 @@ performance_difference_mismatchoe<-performance_by_mismatchoe_table%>%
             worst_perf_constraint=mismatch_oe[which(AUC50.==min_auc50)])
 
 
+# posterior probabilities
+mismatchoe_score_thresholds<-mismatchoe_analysis_res$posterior_prob%>%
+  filter(tool%in%top_performing_tools_original_names)%>%
+  filter(sensitivity>0.005)
+
+mismatchoe_score_thresholds_plot<-
+mismatchoe_score_thresholds%>%
+  filter(grepl('mismatch_min',filter2))%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper(),
+         filter2=as.numeric(stringr::str_replace(filter2,'mismatch_min_oe_ratio:','')))%>%
+  ggplot(aes(x=filter2,
+             color=criteria,y=score,group=criteria))+
+  geom_line()+
+  #geom_point(shape=3,size=2.5,stroke=2)+
+  PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
+  facet_wrap(tool~.,scales='free_y')+
+  theme_minimal()+theme(legend.position = 'top')+
+  labs(x='Mismatch O/E ratio',y='Score',color='Criteria')
+mismatchoe_score_thresholds_plot
+ggsave(filename = glue('{analysis_folder_name}/mismatchoe_score_thresholds_plot.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=mismatchoe_score_thresholds_plot,
+       device = 'png',
+       height = 10,
+       width = 10,
+       dpi = 300,bg='white')
+
+
 ```
 
 # Allele frequency
@@ -801,6 +913,10 @@ performance_by_af_table%>%
 
 ```{r panelapp}
 panelapp_cols<-grep('panelapp:',colnames(proc_data),value = T)
+# convert all NAs in panelapp columns to FALSE (variant not in the panelapp gene)
+proc_data <- proc_data %>%
+  mutate(across(all_of(panelapp_cols), ~ ifelse(is.na(.), FALSE, .)))
+
 min_count_thresh<-200
 panelapp_counts<-data.frame()
 for (pa_col in panelapp_cols){
@@ -810,6 +926,7 @@ for (pa_col in panelapp_cols){
     panelapp_counts<-panelapp_counts%>%bind_rows(data.frame(pa_col,tool,min_count=min_count))
   }
 }
+
 panelapp_to_test<-panelapp_counts%>%
   group_by(pa_col)%>%
   summarize(all_tools_above_thresh=all(min_count>min_count_thresh))%>%
@@ -821,10 +938,11 @@ for (pa_to_test in panelapp_to_test){
 
 #mismatchoe_var_sets<-grep('regeneron',names(var_sets),value = T)
 analysis_var_sets<-generate_var_set_combinations(var_sets[year_to_analyze],var_sets[panelapp_to_test])
-panelapp_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F,save_rocs=F)
+panelapp_analysis_res<-calculate_roc_metrics(proc_data,analysis_var_sets,tools_to_test,complete = F,save_rocs=F,
+                                             converted_scores = converted_scores,calculate_posterior_probs = T)
 # calculate performance for all the variants that have a panelapp 
 var_sets[['all_panelapp']]<-apply(proc_data[, panelapp_to_test], 1, function(row) any(row == TRUE))
-all_panelapp_analysis_res<-calculate_roc_metrics(proc_data,data.frame(filter1=year_to_analyze,filter2='all_panelapp'),tools_to_test,complete = F,save_rocs=F)
+all_panelapp_analysis_res<-calculate_roc_metrics(proc_data,data.frame(filter1=year_to_analyze,filter2='all_panelapp'),tools_to_test,complete = F,save_rocs=F,converted_scores = converted_scores,calculate_posterior_probs = T)
 
 performance_by_panelapp_table<-
   panelapp_analysis_res$roc_metrics_table%>%
@@ -835,22 +953,45 @@ performance_by_panelapp_table<-
          panelapp=stringr::str_replace(panelapp,'panelapp:','')
          )
 
-# consider instead of running nle on all the data, splitting the analysis into multiple tests each time just the overall versus the panel
+# collect features per panel
+pa_attributes_table<-NULL
+for (panel in performance_by_panelapp_table%>%pull(panelapp)%>%unique()){
+  selected_panel<-glue('panelapp:{stringr::str_replace_all(panel," ",".")}')
+  panel_table<-proc_data%>%
+    mutate(AR=var_sets$AR,AD=var_sets$AD,XL=var_sets$XL,
+           high_conservation=var_sets$high_conservation,low_conservation=var_sets$low_conservation)%>%
+    group_by(!!sym(selected_panel))%>%
+    summarize(n=n(),
+              AR=mean(AR,na.rm = T),AD=mean(AD,na.rm = T),XL=mean(XL,na.rm=T),
+              high_conservation=mean(high_conservation,na.rm = T),low_conservation=mean(low_conservation,na.rm = T),
+              missense_min_oe_ratio=mean(missense_min_oe_ratio,na.rm = T),
+              plp=sum(clinvar_class=='P/LP'),
+              blb=sum(clinvar_class=='B/LB'))%>%
+    filter(!!sym(selected_panel))
+  pa_attributes_table<-pa_attributes_table%>%bind_rows(
+    data.frame(panelapp_original=panel,panel_table%>%select(-selected_panel))
+  )
+}
 
+# panelapp performance per panel - check whether there are panels with better/worse overall performance across tools
 library(nlme)
 pa_all_comps<-NULL
 for (pa in performance_by_panelapp_table%>%pull(panelapp)%>%unique()){
-  pa_comp_table<-performance_by_panelapp_table%>%filter(panelapp==pa)%>%
+  pa_comp_table<-performance_by_panelapp_table%>%
+    filter(panelapp==pa)%>%
     bind_rows(
       all_panelapp_analysis_res$roc_metrics_table%>%
         mutate(panelapp='overall_performance',tool=stringr::str_replace(tool,'_score.+','')%>%toupper())
     )%>%
+    filter(tool%in%top_performing_tools)%>%
   mutate(panelapp=relevel(factor(panelapp), ref = "overall_performance"))
   model <- lme(AUC50. ~ panelapp,random=~1 | tool, data = pa_comp_table)
   model_res<-summary(model)
   class_balance<-proc_data%>%filter(!!sym(glue('panelapp:{pa}')))%>%count(clinvar_class)%>%pivot_wider(names_from = clinvar_class,values_from = n)
+  average_overall_auc<-pa_comp_table%>%filter(panelapp=='overall_performance')%>%pull(AUC50.)%>%mean()
+  average_pa_auc<-pa_comp_table%>%filter(panelapp!='overall_performance')%>%pull(AUC50.)%>%mean()
   pa_all_comps<-pa_all_comps%>%bind_rows(
-    data.frame(panelapp=pa,data.frame(t(model_res$tTable[2,])),class_balance)
+    data.frame(panelapp=pa,average_overall_auc,average_pa_auc,data.frame(t(model_res$tTable[2,])),class_balance)
   )
 }
 
@@ -862,61 +1003,199 @@ setdiff(proc_data%>%filter(`panelapp:Structural.eye.disease`)%>%pull(gene.names.
         proc_data%>%filter(`panelapp:Adult.onset.neurodegenerative.disorder`)%>%pull(gene.names.clinvar.2024.04.04..ncbi)%>%unique())
 
 library(ggrepel)
-pa_all_comps%>%
+pa_all_comps<-pa_all_comps%>%mutate(panelapp_original=panelapp,
+                                    panelapp=stringr::str_replace_all(panelapp,'[\\.]+',' '))
+panelapp_overall_performance_diff_plot<-
+  pa_all_comps%>%
   ggplot(aes(x=Value,y=-log(p.value),label=panelapp))+
   geom_point()+
  # geom_point(data=pa_all_comps%>%filter(p.value<0.01),color='blue')+
+  geom_vline(xintercept = 0,linetype=2)+
+  geom_point(data=pa_all_comps%>%filter(p.value<0.01),color='darkorange')+
   geom_point(data=pa_all_comps%>%filter(p.adjust<0.05),color='red')+
-  geom_label_repel(data=pa_all_comps%>%filter(p.adjust<0.05),nudge_y = 0.5)+
+  geom_label_repel(data=pa_all_comps%>%filter(p.value<0.01))+
+  annotate("segment", x = 0.002, xend = 0.01, y = -Inf, yend = -Inf, 
+           arrow = arrow(type = "closed", length = unit(0.3, "cm")), color = "black") +
+  annotate("text", x = 0.005, y = -0.2, label = "Better performance", color = "black", hjust = 0.5) +
+  annotate("segment", x = -0.002, xend = -0.01, y = -Inf, yend = -Inf, 
+           arrow = arrow(type = "closed", length = unit(0.3, "cm")), color = "black") +
+  annotate("text", x = -0.005, y = -0.2, label = "Worse performance", color = "black", hjust = 0.5) +
+  theme_minimal()+labs(x='AUC difference')
+
+panelapp_overall_performance_diff_plot
+ggsave(filename = glue('{analysis_folder_name}/panelapp_overall_performance_diff_plot.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=panelapp_overall_performance_diff_plot,
+       device = 'png',
+       height = 8,
+       width = 12,
+       dpi = 300,bg='white')
+
+# panelapp performance per panel per tool - check whether there are panels with better/worse overall performance in specific tools
+pa_per_tool_all_comps<-NULL
+pa_per_tool_analysis_table<-
+  performance_by_panelapp_table%>%
+  filter(tool%in%top_performing_tools)
+for (pa in pa_per_tool_analysis_table%>%pull(panelapp)%>%unique()){
+  print(pa)
+  for (selected_tool in pa_per_tool_analysis_table%>%pull(tool)%>%unique()){
+    pa_tool_comp_table<-pa_per_tool_analysis_table%>%
+      filter(tool==selected_tool)%>%
+      mutate(panelapp=ifelse(panelapp==pa,pa,'other'))
+    ttest <- t.test(pa_tool_comp_table%>%filter(panelapp=='other')%>%pull(AUC50.), 
+                    mu = pa_tool_comp_table%>%filter(panelapp==pa)%>%pull(AUC50.))
+    ttest_res<-tidy(ttest)
+    pa_per_tool_all_comps<-pa_per_tool_all_comps%>%bind_rows(
+      data.frame(panelapp=pa,tool=selected_tool,panel_auc=pa_tool_comp_table%>%filter(panelapp==pa)%>%pull(AUC50.),
+                 ttest_res)
+    )
+  }
+}
+pa_per_tool_all_comps$p.adjust<-p.adjust(pa_per_tool_all_comps$p.value,method='fdr')
+pa_per_tool_all_comps<-pa_per_tool_all_comps%>%
+  mutate(perf_diff=panel_auc-estimate)
+
+panelapp_performance_plot_per_panel<-
+pa_per_tool_all_comps%>%
+  filter(p.adjust<0.05)%>%
+  mutate(panelapp=stringr::str_replace_all(panelapp,'\\.',' '))%>%
+  ggplot(aes(x = reorder(panelapp, perf_diff, FUN = median), y = perf_diff))+
+  geom_boxplot()+
+  geom_hline(yintercept = 0,linetype=2)+
+  coord_flip()+
+  theme_minimal()+
+  labs(x=NULL,y=NULL)
+panelapp_performance_plot_per_panel
+ggsave(filename = glue('{analysis_folder_name}/panelapp_performance_plot_per_panel.{year_to_analyze}.{Sys.Date()}.png'),
+       plot=panelapp_performance_plot_per_panel,
+       device = 'png',
+       height = 12,
+       width = 8,
+       dpi = 300,bg='white')
+
+feature_comp<-
+pa_per_tool_all_comps%>%
+  group_by(panelapp)%>%
+  summarize(sig_better=sum(ifelse(p.adjust<0.05 & perf_diff>0,1,0))/n(),
+            sig_worse=sum(ifelse(p.adjust<0.05 & perf_diff<0,1,0))/n(),
+            total=n())%>%
+  ungroup()
+
+# compare features for variants in panels that have differing performance
+pa_better_worse_comp<-pa_attributes_table%>%
+  mutate(better_worse=ifelse(feature_comp%>%filter(panelapp==panelapp_original)%>%pull(sig_better)>0.6,'better',
+                             ifelse(feature_comp%>%filter(panelapp==panelapp_original)%>%pull(sig_worse)>0.6,'worse','same')))%>%
+  rowwise()%>%
+  mutate(avg_diff=mean(pa_per_tool_all_comps%>%filter(panelapp==panelapp_original)%>%pull(perf_diff)))%>%
+  ungroup()%>%
+  mutate(avg_diff_cat=cut(avg_diff,3,labels = c('AUC decrease','AUC same','AUC increase')),
+         plp_rate=plp/(plp+blb))
+
+library(gtsummary)
+pa_better_worse_comp%>%
+  select(-c(panelapp_original,better_worse,plp,blb,avg_diff))%>%
+  tbl_summary(by = avg_diff_cat) %>%
+  add_p()%>%
+  as_tibble()%>%
+  write.table(file = glue('{analysis_folder_name}/panelapp_better_worse_comp_{year_to_analyze}.{Sys.Date()}.csv'),row.names = F,sep = '\t')
+
+# DEPRACATED
+
+# all panels
+pa_all_comps_for_glm<-pa_all_comps%>%filter(p.value<0.01)
+
+pa_all_comps_for_glm<-pa_all_comps_for_glm%>%left_join(pa_attributes_table)
+pa_all_comps_for_glm<-pa_all_comps_for_glm%>%mutate(
+  better=ifelse(Value>0,1,0)
+)
+res<-tidy(lm('Value~AD+AR+XL+high_conservation+low_conservation',data=pa_all_comps_for_glm))
+res
+
+
+
+# per panel
+#panel_for_table<-'Structural eye disease'
+panel_for_table<-'Bleeding and platelet disorders'
+selected_panel<-glue('panelapp:{stringr::str_replace_all(panel_for_table," ",".")}')
+panel_table<-proc_data%>%select(selected_panel,missense_min_oe_ratio,moi_gencc)%>%
+  mutate(conservation=ifelse(var_sets$high_conservation,'High',
+                             ifelse(var_sets$low_conservation,'Low','Intermediate')),
+         moi_gencc=case_when(
+           moi_gencc=='Autosomal dominant'~'AD',
+           moi_gencc=='Autosomal recessive'~'AR',
+           moi_gencc=='X-linked'~'XL',
+           .default='Unknown'))
+library(gtsummary)
+panel_table%>%
+  tbl_summary(by = selected_panel) %>%
+  add_p()
+
+
+
+# this analysis goes over each tool and tests what are the attributes of the variants in the panels that contributed to the performance. so for example if you see a significant positive value in AR it means that having a higher rate of AR genes in the panel results in better performance of the tool
+pa_per_tool_attribute_effect<-performance_by_panelapp_table%>%left_join(pa_attributes_table,by=c('panelapp'='panelapp_original'))
+pa_per_tool_attribute_effect<-pa_per_tool_attribute_effect%>%filter(tool %in% top_performing_tools)
+
+# all tools
+all_tools_all_panels_attribute_lme<- lme(AUC50.~AD+AR+XL+missense_min_oe_ratio,random=~1 | tool, data = pa_per_tool_attribute_effect)
+all_tools_all_panels_attribute_lme_res<-data.frame(summary(all_tools_all_panels_attribute_lme)$tTable)
+all_tools_all_panels_attribute_lme_res
+
+write.table(all_tools_all_panels_attribute_lme_res,file=glue('{analysis_folder_name}/all_tools_all_panels_attribute_lm_res.{Sys.Date()}.csv'),row.names =T,sep='\t')
+
+pa_per_tool_attribute_effect%>%select(panelapp,tool,AUC50.,AD,AR,XL,high_conservation,low_conservation)%>%
+  pivot_longer(-c(panelapp,tool,AUC50.))%>%
+  mutate(name=forcats::fct_relevel(factor(name),'AD','AR','XL'))%>%
+  group_by(name)%>%
+  mutate(value_cat=cut(value,5))%>%
+  ggplot(aes(x=value_cat,y=AUC50.))+
+  geom_jitter(width=0.2,alpha=0.1)+
+  geom_boxplot(fill=NA,outlier.color = NA)+
+  facet_wrap(name~.,scales = 'free')+
   theme_minimal()
+
+# DEPRACATED
+
+# per tool
+pa_per_tool_attribute_effect_res<-NULL
+for (selected_tool in pa_per_tool_attribute_effect%>%pull(tool)%>%unique()){
+  print(selected_tool)
+  pa_per_tool_attribute_effect_res<-
+    pa_per_tool_attribute_effect_res%>%bind_rows(
+      data.frame(selected_tool,tidy(lm('AUC50.~AD+AR+XL+high_conservation+low_conservation',
+                              data = pa_per_tool_attribute_effect%>%filter(tool==selected_tool)))))
+}
+
+
 
 # now for each tool, compare each panel against all the rest
 pa_per_tool_comp<-NULL
 for (pa in performance_by_panelapp_table%>%pull(panelapp)%>%unique()){
   print(pa)
-  for (selected_tool in performance_by_panelapp_table%>%pull(tool)%>%unique()){
-    tool_pa_comp_table<-performance_by_panelapp_table%>%filter(tool==selected_tool)%>%
-      mutate(panelapp=ifelse(panelapp==pa,pa,'Other'),
-             panelapp=forcats::fct_relevel(panelapp,'Other'))
-    model <- tidy(lm(AUC50. ~ panelapp,data = tool_pa_comp_table))
-    pa_per_tool_comp<-pa_per_tool_comp%>%bind_rows(
-      data.frame(panelapp=pa,tool=selected_tool,model%>%filter(term==glue('panelapp{pa}'))))
-  }
+  panel_table<-proc_data%>%
+    mutate(AR=var_sets$AR,AD=var_sets$AD,XL=var_sets$XL,
+           high_conservation=var_sets$high_conservation,low_conservation=var_sets$low_conservation)%>%
+    group_by(!!sym(selected_panel))%>%
+    summarize(n=n(),
+              AR=mean(AR,na.rm = T),AD=mean(AD,na.rm = T),XL=mean(XL,na.rm=T),
+              high_conservation=mean(high_conservation,na.rm = T),low_conservation=mean(low_conservation,na.rm = T),
+              missense_min_oe_ratio=mean(missense_min_oe_ratio,na.rm = T))%>%
+    filter(!!sym(selected_panel))
 }
 
-pa_per_tool_comp<-NULL
-for (selected_tool in performance_by_panelapp_table%>%pull(tool)%>%unique()){
-  print(selected_tool)
-  for (pa in performance_by_panelapp_table%>%pull(panelapp)%>%unique()){
-    mean_auc_tool<-performance_by_panelapp_table%>%filter(tool==selected_tool,panelapp!=pa)%>%pull(AUC50.)%>%mean()
-    sd_auc_tool<-performance_by_panelapp_table%>%filter(tool==selected_tool,panelapp!=pa)%>%pull(AUC50.)%>%sd()
-    tool_pa_auc<-performance_by_panelapp_table%>%filter(tool==selected_tool,panelapp==pa)%>%pull(AUC50.)
-    # Calculate the cumulative probability up to X
-    cum_prob_pa <- pnorm(tool_pa_auc, mean = mean_auc_tool, sd = sd_auc_tool)
-    #print(glue("{tool}: Cumulative probability of the AUC ({tool_pa_auc}) given average AUC of {mean_auc_tool}: {cum_prob_pa} | {prob_density_pa}"))
-    pa_per_tool_comp<-pa_per_tool_comp%>%bind_rows(
-      data.frame(tool=selected_tool,panelapp=pa,tool_pa_auc,mean_auc_tool,p1=cum_prob_pa,p2=1-cum_prob_pa)
-    )
-    }
-}
 
-pa_per_tool_comp<-pa_per_tool_comp%>%
-  mutate(diff=tool_pa_auc-mean_auc_tool)%>%
-  rowwise()%>%mutate(p.value=min(p1,p2))%>%ungroup()
-
-
+library(ggrepel)
 to_plot<-pa_per_tool_comp%>%
-  filter(tool %in% top_performing_tools)%>%
-  filter(panelapp %in% (pa_all_comps%>%filter(p.value<0.05)%>%pull(panelapp)))
+  #filter(tool %in% top_performing_tools)%>%
+  filter(panelapp %in% (pa_all_comps%>%filter(p.value<0.05)%>%pull(panelapp_original)))
 to_plot$p.adjust<-p.adjust(to_plot$p.value,method='fdr')
 to_plot%>%
-  ggplot(aes(x=diff,y=-log(p.value),label=panelapp))+
+  ggplot(aes(x=estimate,y=-log(p.value),label=panelapp))+
   geom_point()+
-  geom_point(data=to_plot%>%filter(p.adjust<0.05,diff>0.025),color='lightgreen')+
-  geom_point(data=to_plot%>%filter(p.adjust<0.05,diff<(-0.025)),color='lightpink')+
-  geom_label_repel(data=to_plot%>%filter(p.adjust<0.05,diff>0.025),fill='lightgreen')+
-  geom_label_repel(data=to_plot%>%filter(p.adjust<0.05,diff<(-0.025)),fill='lightpink')+
-  facet_wrap(tool~.)+
+  geom_point(data=to_plot%>%filter(p.adjust<0.05,estimate>0),color='lightgreen')+
+  geom_point(data=to_plot%>%filter(p.adjust<0.05,estimate<(-0)),color='lightpink')+
+  geom_label_repel(data=to_plot%>%filter(p.adjust<0.05,estimate>0),fill='lightgreen')+
+  geom_label_repel(data=to_plot%>%filter(p.adjust<0.05,estimate<(-0)),fill='lightpink')+
+  facet_wrap(tool~.,scales='free')+
   theme_minimal()
 ```
 

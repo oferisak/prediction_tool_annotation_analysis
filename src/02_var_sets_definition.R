@@ -24,6 +24,7 @@ var_sets<-list('all'=rep(TRUE,nrow(proc_data)),
 # missing values filter ####
 var_sets[['AD']]<-grepl('Autosomal dominant',proc_data$moi_gencc)
 var_sets[['AR']]<-grepl('Autosomal recessive',proc_data$moi_gencc)
+var_sets[['XL']]<-grepl('X-linked',proc_data$moi_gencc)
 
 # Per year var set
 years<-2013:2024

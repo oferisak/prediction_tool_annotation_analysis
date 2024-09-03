@@ -120,14 +120,30 @@ adaptive_density <- function(score, density_object) {
 
 
 # claude solution for posterior prob calculation
-calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,bw_method) {
+calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,bw_method='nrd0') {
   # Ensure labels are factor
   labels <- factor(labels, levels = c("P/LP", "B/LB"))
   
   # Calculate likelihoods
-  density_plp <- density(scores[labels == "P/LP"],bw = bw_method)
+  #density_plp <- density(scores[labels == "P/LP"],bw = bw_method)
+  density_plp <- tryCatch({
+    density(scores[labels == "P/LP"], bw = bw_method)
+  }, error = function(e) {
+    message("Error with initial bw_method. Trying a different bw_method.")
+    # You can specify an alternative bw_method here
+    alternative_bw_method <- "ucv"  # Example alternative method
+    density(scores[labels == "P/LP"], bw = alternative_bw_method)
+  })
   #max_plp_dens<-max(density_plp$y)
-  density_blb <- density(scores[labels == "B/LB"],bw = bw_method)
+  #density_blb <- density(scores[labels == "B/LB"],bw = bw_method)
+  density_blb <- tryCatch({
+    density(scores[labels == "B/LB"], bw = bw_method)
+  }, error = function(e) {
+    message("Error with initial bw_method. Trying a different bw_method.")
+    # You can specify an alternative bw_method here
+    alternative_bw_method <- "ucv"  # Example alternative method
+    density(scores[labels == "B/LB"], bw = alternative_bw_method)
+  })
   # if the score is overly dispersed, return NA
   if (sd(density_plp$y)>50){
     message(glue('Score is overly dispersed, will skip posterior probability calculation'))
@@ -153,15 +169,18 @@ calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,b
     # likelihood_blb <- adaptive_density(score, density_blb)
     
     # Using dataset_ratio as prior
-    prior_plp <- dataset_ratio
-    prior_blb <- 1 - dataset_ratio
+    # prior_plp <- dataset_ratio
+    # prior_blb <- 1 - dataset_ratio
     
-    posterior_plp <- (likelihood_plp * prior_plp) / 
-      (likelihood_plp * prior_plp + likelihood_blb * prior_blb)
+    # posterior_plp <- (likelihood_plp * prior_plp) / 
+    #   (likelihood_plp * prior_plp + likelihood_blb * prior_blb)
     
     # Adjust for population ratio
-    adjusted_posterior_plp <- (posterior_plp * pop_ratio) / 
-      (posterior_plp * pop_ratio + (1 - posterior_plp) * (1 - pop_ratio))
+    # adjusted_posterior_plp <- (posterior_plp * pop_ratio) / 
+    #   (posterior_plp * pop_ratio + (1 - posterior_plp) * (1 - pop_ratio))
+    
+    adjusted_posterior_plp <- (likelihood_plp * pop_ratio) / 
+         (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))# change the prior plp with the adjusted pop ratio
     
     return(adjusted_posterior_plp)
   })
@@ -232,11 +251,13 @@ calculate_dataset_posterior_prob<-function(tool_var_set,
 #                                  original_dataset_ratio = original_dataset_ratio,
 #                                  converted_tool=FALSE,bw_method = 'nrd0')
 
+# bandwidth selection explanation: https://aakinshin.net/posts/kde-bw/ the recommended bw is SJ, but it returns sample is too sparse
 calculate_roc_metrics<-function(proc_data,var_sets_list,
                                 tools_to_test,
                                 converted_scores,
                                 complete=TRUE,save_rocs=TRUE,
-                                calculate_posterior_probs=FALSE){
+                                calculate_posterior_probs=FALSE,
+                                bw_method='nrd'){
   roc_metrics_table<-NULL
   rocs_table<-NULL
   posterior_probs<-NULL
@@ -273,7 +294,9 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,
                                                                dataset_ratio,
                                                                original_dataset_ratio,
                                                                pop_ratio=0.0441,
-                                                               converted_tool,bw_method = 'nrd0'))
+                                                               converted_tool,
+                                                               bw_method = bw_method))
+                                                               #bw_method = 'nrd0'))
         if ('P.LP' %in% colnames(tool_posterior_probs)){
           tool_posterior_probs<-tool_posterior_probs%>%
             mutate(sensitivity=P.LP/var_set_n_plp)
