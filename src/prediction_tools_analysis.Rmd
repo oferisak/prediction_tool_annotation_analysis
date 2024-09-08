@@ -17,6 +17,7 @@ i have a dataset called tool_var_set of variants classified as either P/LP ir B/
 
 # Comments:
 - went over the missing values for the different tools - they are really missing.. 
+- tried different bw methods, SJ and ucv capture the density more accurately but the are not smooth enough and therefore much more noisy (when calculating the likelihood ratio), using nrd0 results in more consistent results - higher values have higher likelihoods
 
 # TODO : 
 
@@ -50,7 +51,7 @@ becnchmarking analysis - phenotype based - https://www.ncbi.nlm.nih.gov/pmc/arti
 
 ```{r load_project}
 # if you want to load a preexisting project just define the folder name
-analysis_folder_name<-'./output/prediction_tools_analysis.2024-09-02'
+analysis_folder_name<-'./output/prediction_tools_analysis.2024-09-04'
 ```
 
 ```{r markdown_setup,include=FALSE}
@@ -79,8 +80,6 @@ if (exists('analysis_folder_name')){
   excluded_tools<-c('fathmm.xf_coding','esm1b','varity_r_loo','varity_er','varity_er_loo','eve','mutpred','m.cap','mpc','mutationassessor','lrt','mvp','list.s2','h1.hesc_fitcons','huvec_fitcons','gm12878_fitcons','integrated_fitcons') 
 }
 
-
-
 ```
 
 ```{r save_load_data}
@@ -108,7 +107,7 @@ collect overall performance for each model
 ```{r rocs}
 # Definitions
 tools_to_test<-tools_without_excluded
-#time_var_set<-c('at_or_after_2023')
+time_var_set<-c('at_or_after_2023')
 time_var_set<-c('at_or_after_2021','at_or_after_2022','at_or_after_2023','at_or_after_2024')
 top_num<-10
 
@@ -123,7 +122,7 @@ overall_performance_full_analysis_res<-calculate_roc_metrics(proc_data,
                                                              analysis_var_sets,
                                                              tools_without_excluded,complete = F,
                                                              converted_scores = converted_scores,
-                                                             calculate_posterior_probs = TRUE)
+                                                             calculate_posterior_probs = TRUE,bw_method = 'ucv')
 
 rocs_data<-c(overall_performance_complete_analysis_res$procs,overall_performance_full_analysis_res$procs)
 overall_performance_table<-overall_performance_complete_analysis_res$roc_metrics_table%>%
@@ -229,7 +228,8 @@ paragraph <- sprintf(
 # Print the paragraph
 cat(paragraph)
 
-# score thresholds calculations - should be performed using the full dataset (per tool)
+# score thresholds calculations ####
+# - should be performed using the full dataset (per tool)
 overall_score_thresholds<-
 overall_performance_full_analysis_res$posterior_prob%>%
   filter(filter1==year_to_analyze)%>%
@@ -238,6 +238,59 @@ overall_performance_full_analysis_res$posterior_prob%>%
   select(tool,score,criteria)%>%
   pivot_wider(names_from = criteria,values_from = score)
 write.table(overall_score_thresholds,file=glue('{analysis_folder_name}/overall_performance.posterior_prob.{Sys.Date()}.csv'),row.names = F,sep='\t')
+
+library(ggrepel)
+proc_data%>%filter(var_sets[[year_to_analyze]])%>%
+  select(clinvar_class,all_of(top_performing_tools_original_names))%>%
+  pivot_longer(-clinvar_class)%>%
+  left_join(overall_score_thresholds%>%rename(name=tool))%>%
+  group_by(name) %>%
+  mutate(
+    row_to_keep = row_number() == 1,  # Select only the first row for each tool
+    P = ifelse(row_to_keep, P, NA),
+    M = ifelse(row_to_keep, M, NA),
+    S = ifelse(row_to_keep, S, NA),
+    VS = ifelse(row_to_keep, VS, NA)
+  ) %>%
+  ungroup() %>%
+  mutate(name=toupper(stringr::str_replace(name,'_score.dbnsfp4.5a','')))%>%
+  mutate(M=ifelse(name%in%c('CADD_PHRED','CLINPRED'),NA,M))%>%
+  filter(!is.na(value))%>%
+  ggplot(aes(x=value,fill=clinvar_class))+
+  geom_histogram(bins=50,position='dodge',alpha=0.5)+
+  scale_fill_manual(values=c('gray','black'))+
+  geom_vline(aes(xintercept = P,color="P"),linetype=2,linewidth=0.75)+
+  geom_vline(aes(xintercept = M,color="M"),linetype=2,linewidth=0.75)+
+  geom_vline(aes(xintercept = S,color="S"),linetype=2,linewidth=0.75)+
+  geom_vline(aes(xintercept = VS,color="VS"),linetype=2,linewidth=0.75)+
+  # Text annotations for vertical lines
+  geom_text(aes(x = P, y = Inf, label = round(P,2)), vjust = -0.2,hjust=1.2, color = prettycols(palette = 'Lively', n = 4)[1],angle = 90) +
+  geom_text(aes(x = M, y = Inf, label = round(M,2)), vjust = -0.2,hjust=1.2, color = prettycols(palette = 'Lively', n = 4)[2],angle = 90) +
+  geom_text(aes(x = S, y = Inf, label = round(S,2)), vjust = -0.2,hjust=1.2, color = prettycols(palette = 'Lively', n = 4)[3],angle = 90) +
+  geom_text(aes(x = VS, y = Inf, label = round(VS,2)), vjust = -0.2,hjust=1.2, color = prettycols(palette = 'Lively', n = 4)[4],angle = 90) +
+  facet_wrap(name~.,scales='free')+
+  # Add color scale for vlines to generate the legend
+  scale_color_manual(name = "Criteria", values = c(
+    "P" = prettycols(palette = 'Lively', n = 4)[1],
+    "M" = prettycols(palette = 'Lively', n = 4)[2],
+    "S" = prettycols(palette = 'Lively', n = 4)[3],
+    "VS" = prettycols(palette = 'Lively', n = 4)[4]
+  ),breaks = c("P", "M", "S", "VS")
+  )+
+  labs(fill='Class')+
+  theme_minimal()+theme(legend.position = 'top')
+
+
+overall_performance_full_analysis_res$posterior_prob%>%
+  filter(filter1==year_to_analyze)%>%
+  mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
+  ggplot(aes(x=tool,color=criteria,y=score,size=sensitivity))+
+  geom_point(shape=3,stroke=2)+
+  PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
+  facet_wrap(tool~.,scales='free')+
+  theme_minimal()+theme(legend.position = 'top')+
+  labs(x='Tool',y='Score',color='Criteria')
+overall_performance_thresholds_plot
 ```
 
 # Missingness
@@ -548,12 +601,12 @@ conservation_score_thresholds%>%
   mutate(filter2=stringr::str_replace(filter2,'_conservation',''))%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   ggplot(aes(x=factor(filter2, levels = rev(levels(factor(filter2)))),
-             color=criteria,y=score))+
-  geom_point(shape=3,size=2.5,stroke=2)+
+             color=criteria,y=score,size=sensitivity))+
+  geom_point(shape=3,stroke=2)+
   PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
   facet_wrap(tool~.,scales='free_y')+
   theme_minimal()+theme(legend.position = 'top')+
-  labs(x='Conservation',y='Score',color='Criteria')
+  labs(x='Conservation',y='Score',color='Criteria',size='TPR')
 conservation_score_thresholds_plot
 ggsave(filename = glue('{analysis_folder_name}/conservation_score_thresholds_plot.{year_to_analyze}.{Sys.Date()}.png'),
        plot=conservation_score_thresholds_plot,
@@ -618,7 +671,7 @@ ggsave(filename = glue('{analysis_folder_name}/performance_by_conservation_bump_
 
 ## Overall comparison
 ```{r moi}
-
+var_sets[['XL']]<-grepl('X-linked',proc_data$moi_gencc)
 proc_data%>%
   mutate(moi_gencc=case_when(
            moi_gencc=='Autosomal dominant'~'AD',
@@ -734,7 +787,7 @@ summary(moi_sens_model)
 moi_spec_model<-lme(spec ~ moi,random=~1 | tool, data = performance_by_moi_table%>%filter(moi%in%c('AD','AR'))%>%filter(!is.na(spec)))
 summary(moi_spec_model)
 
-# posterior probabilities
+# posterior probabilities ####
 moi_score_thresholds<-moi_analysis_res$posterior_prob%>%
   filter(tool%in%top_performing_tools_original_names)%>%
   filter(sensitivity>0.005)
@@ -744,12 +797,12 @@ moi_score_thresholds%>%
   filter(filter2%in%c('AD','AR','XL'))%>%
   mutate(tool=stringr::str_replace(tool,'_score.+','')%>%toupper())%>%
   ggplot(aes(x=factor(filter2, levels = rev(levels(factor(filter2)))),
-             color=criteria,y=score))+
-  geom_point(shape=3,size=2.5,stroke=2)+
+             color=criteria,y=score,size=sensitivity))+
+  geom_point(shape=3,stroke=2)+
   PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
   facet_wrap(tool~.,scales='free_y')+
   theme_minimal()+theme(legend.position = 'top')+
-  labs(x='Mode of Inheritance',y='Score',color='Criteria')
+  labs(x='Mode of Inheritance',y='Score',color='Criteria',size='TPR')
 moi_score_thresholds_plot
 ggsave(filename = glue('{analysis_folder_name}/moi_score_thresholds_plot.{year_to_analyze}.{Sys.Date()}.png'),
        plot=moi_score_thresholds_plot,

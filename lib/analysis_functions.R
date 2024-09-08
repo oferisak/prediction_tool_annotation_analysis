@@ -23,95 +23,6 @@ combine_filter_sets<-function(var_sets, var_set_names) {
   return(result)
 }
 
-calculate_calibration_df<-function(tool_var_set,tool,breaks=10,hmisc=FALSE,prior_prob=0.0441,round_score_val=3){
-  scores<-tool_var_set%>%pull(tool)%>%round(round_score_val)%>%unique()
-  # Generate all combinations of two elements
-  combinations <- t(combn(scores, 2))
-  # Filter combinations where the first value is less than the second
-  valid_combinations <- data.frame(combinations[combinations[, 1] < combinations[, 2], ])
-  prior_odds<-prior_prob/(1-prior_prob)
-  cumevents<-tool_var_set%>%select(tool,clinvar_class)%>%
-    mutate(round_tool=round(!!sym(tool),round_score_val))%>%
-    arrange(-round_tool)
-  cumevents$cum_event<-cumsum(cumevents$clinvar_class=='P/LP')
-  cumevents$total_at_or_above_score<-1:nrow(cumevents)
-  cumevents<-cumevents%>%
-    group_by(round_tool)%>%
-    slice_max(total_at_or_above_score)%>%
-    ungroup()%>%select(-clinvar_class)
-
-  weight<-(sum(tool_var_set$clinvar_class=='P/LP')/sum(tool_var_set$clinvar_class=='B/LB'))/prior_odds
-  valid_combinations<-valid_combinations%>%left_join(cumevents,by=c('X1'='round_tool'))%>%
-    left_join(cumevents,by=c('X2'='round_tool'))
-  valid_combinations<-valid_combinations%>%
-    mutate(events_in_range=cum_event.x-cum_event.y,
-           total_in_range=total_at_or_above_score.x-total_at_or_above_score.y)
-  valid_combinations<-
-    valid_combinations%>%
-    filter(total_in_range>300,total_in_range<30000)%>%
-    mutate(tool = tool,
-           # likelihood = events_in_range / sum(events_in_range),
-           # p_score = total_in_range / sum(total_in_range),
-           # posterior_prob = (likelihood * prior_prob) / p_score,
-           posterior_prob_weight = events_in_range / (events_in_range + (total_in_range - events_in_range) * weight),
-           
-           # binom_ci = purrr::map2(events_in_range, round(events_in_range + (total_in_range - events_in_range) * weight),
-           #                        ~ binom.test(.x, .y, conf.level = 0.95)$conf.int)
-    ) #%>%
-    # mutate(low_ci = purrr::map_dbl(binom_ci, 1),
-    #        high_ci = purrr::map_dbl(binom_ci, 2)) %>%
-    # select(-binom_ci)
-    # z<-valid_combinations%>%mutate(binom_ci = purrr::map2_df(total_in_range,round(posterior_prob_weight*total_in_range),~binom.test(n=.x,x=.y)$conf.int))#%>%
-    # z%>% mutate(low_ci = binom_ci[1],high_ci=binom_ci[2]) %>%
-    #          select(-binom_ci)
-  
-    class_cats<-c('VS','S','M','P')
-    class_posteriors<-c(0.9811,0.6073,0.2108,0.0999)
-    ranges<-NULL
-    remaining_combinations<-valid_combinations
-    for (class_post in class_posteriors){
-      print(class_post)
-      matching_ranges<-remaining_combinations%>%
-        #filter(abs(class_post-posterior_prob_weight)==min(abs(class_post-posterior_prob_weight)))
-        filter(((abs(class_post-posterior_prob_weight)<0.002)|
-                  ((posterior_prob_weight-class_post)>0.002)&((posterior_prob_weight-class_post)<0.01)))%>%
-        slice_max(total_in_range)
-      ranges<-ranges%>%bind_rows(data.frame(class_post,
-                                            matching_ranges))
-      remaining_combinations<-valid_combinations%>%filter(X2==matching_ranges$X1)
-    }
-    ranges<-ranges%>%
-      bind_rows(valid_combinations%>%filter(X1==max(ranges$X2),X2==max(valid_combinations$X2)))%>%
-      arrange(-X1)%>%mutate(class_post=c(class_posteriors,NA),class_cats=c(class_cats,NA))%>%
-      select(-c(cum_event.x,cum_event.y,total_at_or_above_score.x,total_at_or_above_score.y))
-    
-  if (hmisc){
-    to_ret<-tool_var_set%>%mutate(.pred_cat=Hmisc::cut2(!!sym(tool),m = 500))
-  }else{
-    to_ret<-tool_var_set%>%mutate(.pred_cat=cut(!!sym(tool),breaks = breaks))
-  }
-  to_ret <-
-    to_ret %>%
-    group_by(.pred_cat) %>%
-    summarize(total = n(),
-              events = sum(clinvar_class == 'P/LP'),
-              rate = events / total) %>%
-    mutate(tool = tool,
-           likelihood = events / sum(events),
-           p_score = total / sum(total),
-           posterior_prob = (likelihood * prior_prob) / p_score,
-           posterior_prob_weight = events / (events + (total - events) * weight),
-           binom_ci = purrr::map2(events, round(events + (total - events) * weight),
-                           ~ binom.test(.x, .y, conf.level = 0.95)$conf.int)
-    ) %>%
-    mutate(low_ci = purrr::map_dbl(binom_ci, 1),
-           high_ci = purrr::map_dbl(binom_ci, 2)) %>%
-    select(-binom_ci)
-  tail(to_ret)
-  
-  return(to_ret)
-}
-
 adaptive_density <- function(score, density_object) {
   eval.points <- score
   density_value <- predict(density_object, x = eval.points)
@@ -120,10 +31,9 @@ adaptive_density <- function(score, density_object) {
 
 
 # claude solution for posterior prob calculation
-calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,bw_method='nrd0') {
+calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,bw_method) {
   # Ensure labels are factor
   labels <- factor(labels, levels = c("P/LP", "B/LB"))
-  
   # Calculate likelihoods
   #density_plp <- density(scores[labels == "P/LP"],bw = bw_method)
   density_plp <- tryCatch({
@@ -180,13 +90,14 @@ calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,b
     #   (posterior_plp * pop_ratio + (1 - posterior_plp) * (1 - pop_ratio))
     
     adjusted_posterior_plp <- (likelihood_plp * pop_ratio) / 
-         (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))# change the prior plp with the adjusted pop ratio
+         (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))
     
     return(adjusted_posterior_plp)
   })
   
   return(posterior_probs)
 }
+
 
 # the dataset ratio should not be based on the tool's ratio but rather the P/B ratio in the complete var set regardless of each score's missingness
 # converted tool - whether the tools scores are converted (lower scores are more likely to be pathogenic)
@@ -196,7 +107,7 @@ calculate_dataset_posterior_prob<-function(tool_var_set,
                                            original_dataset_ratio,
                                            pop_ratio=0.0441,
                                            converted_tool=FALSE,
-                                           bw_method='nrd0'){
+                                           bw_method){
   data <- tool_var_set
   
   # Calculate dataset-specific ratio
@@ -257,7 +168,7 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,
                                 converted_scores,
                                 complete=TRUE,save_rocs=TRUE,
                                 calculate_posterior_probs=FALSE,
-                                bw_method='nrd'){
+                                bw_method='nrd0'){
   roc_metrics_table<-NULL
   rocs_table<-NULL
   posterior_probs<-NULL
@@ -275,7 +186,7 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,
       message(glue('Out of {original_nrow} variants, {complete_nrow} ({round(complete_nrow/original_nrow,3)}) had values in all of the tools to test'))
     }
     var_set<-var_set%>%mutate(revel_pred.dbnsfp4.5a=ifelse(revel_score.dbnsfp4.5a>0.5,'D','T'))
-    var_set_n_plp<-sum(var_set$clinvar_class=='P/LP',na.rm = T)
+    var_set_n_plp<-sum(var_set$clinvar_class=='P/LP',na.rm = T) # its more correct to use the tool_var_set plp because its not fair to calculate sensitivity if the tool cant see tthe variant
     dataset_ratio<-mean(var_set$clinvar_class=='P/LP',na.rm = T)
     message(glue('With {var_set_n_plp} pathogenic variants, the P/B ratio in the {paste0(row%>%slice(1),collapse=":")} dataset is {dataset_ratio}'))
     cat('\n')
@@ -296,10 +207,11 @@ calculate_roc_metrics<-function(proc_data,var_sets_list,
                                                                pop_ratio=0.0441,
                                                                converted_tool,
                                                                bw_method = bw_method))
-                                                               #bw_method = 'nrd0'))
+                                                               
         if ('P.LP' %in% colnames(tool_posterior_probs)){
+          tool_var_set_n_plp<-sum(tool_var_set$clinvar_class=='P/LP',na.rm = T) # its more correct to use the tool_var_set plp because its not fair to calculate sensitivity if the tool cant see tthe variant
           tool_posterior_probs<-tool_posterior_probs%>%
-            mutate(sensitivity=P.LP/var_set_n_plp)
+            mutate(sensitivity=P.LP/tool_var_set_n_plp)
         }
         posterior_probs<-posterior_probs%>%bind_rows(
           data.frame(
