@@ -68,34 +68,25 @@ calculate_plp_probability <- function(scores, labels, dataset_ratio, pop_ratio,b
   }
   
   # Calculate posterior probabilities
-  posterior_probs <- sapply(scores, function(score) {
+  # posterior_probs <- lapply(scores, function(score) {
+  #   likelihood_plp <- get_density(score, density_plp)
+  #   likelihood_blb <- get_density(score, density_blb)
+  #   adjusted_posterior_plp <- (likelihood_plp * pop_ratio) / 
+  #        (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))
+  #   
+  #   return(data.frame(likelihood_plp=likelihood_plp,likelihood_blb=likelihood_blb,posterior_probs=adjusted_posterior_plp))
+  # })
+  # 
+  posterior_probs <- vapply(scores, function(score) {
     likelihood_plp <- get_density(score, density_plp)
     likelihood_blb <- get_density(score, density_blb)
-    
-    # likelihood_PLP <- approx(density_plp$x, density_plp$y, xout = score)$y
-    # likelihood_BLB <- approx(density_blb$x, density_blb$y, xout = score)$y
-    
-    # likelihood_plp <- adaptive_density(score, density_plp)
-    # likelihood_blb <- adaptive_density(score, density_blb)
-    
-    # Using dataset_ratio as prior
-    # prior_plp <- dataset_ratio
-    # prior_blb <- 1 - dataset_ratio
-    
-    # posterior_plp <- (likelihood_plp * prior_plp) / 
-    #   (likelihood_plp * prior_plp + likelihood_blb * prior_blb)
-    
-    # Adjust for population ratio
-    # adjusted_posterior_plp <- (posterior_plp * pop_ratio) / 
-    #   (posterior_plp * pop_ratio + (1 - posterior_plp) * (1 - pop_ratio))
-    
     adjusted_posterior_plp <- (likelihood_plp * pop_ratio) / 
-         (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))
+      (likelihood_plp * pop_ratio + likelihood_blb * (1-pop_ratio))
     
-    return(adjusted_posterior_plp)
-  })
+    return(c('likelihood_plp'=likelihood_plp,'likelihood_blb'=likelihood_blb,'posterior_probs'=adjusted_posterior_plp))
+  },FUN.VALUE = numeric(3))
   
-  return(posterior_probs)
+  return(posterior_probs%>%t()%>%as.data.frame())
 }
 
 
@@ -122,16 +113,18 @@ calculate_dataset_posterior_prob<-function(tool_var_set,
     data%>%pull(clinvar_class), 
     dataset_ratio, 
     adjusted_pop_ratio,
-    bw_method
+    bw_method=bw_method
   )
   # if score overly dispresed, plp will return NA
   if (length(probabilities)==0){return(data.frame(tool=tool))}
-  criteria<-cut(probabilities,breaks=c(0.0999,0.2108,0.6073,0.9811,1),labels=c('P','M','S','VS'))
+  criteria<-cut(probabilities$posterior_probs,breaks=c(0.0999,0.2108,0.6073,0.9811,1),labels=c('P','M','S','VS'))
   posterior_prob_df<-data.frame(tool,
                                 score=data%>%pull(tool),
-                                post_prob = probabilities,
+                                probabilities,
                                 criteria,
-                                clinvar_class=tool_var_set$clinvar_class)
+                                clinvar_class=tool_var_set$clinvar_class)%>%
+    mutate(scaled_density=((likelihood_plp+likelihood_blb)/max(likelihood_plp+likelihood_blb)),
+           criteria=forcats::fct_relevel(factor(ifelse(scaled_density>=0.05,as.character(criteria),NA)),'P','M','S','VS'))
   if(converted_tool){
     posterior_prob_df_by_criteria<-posterior_prob_df%>%
       group_by(criteria)%>%
