@@ -1159,7 +1159,13 @@ af_score_thresholds%>%
   ggplot(aes(x=af,
              color=criteria,y=score,size=sensitivity))+
   geom_point(shape=3,stroke=1.5)+
-  PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
+  scale_color_manual(name = "Criteria", values = c(
+    "P" = prettycols(palette = 'Lively', n = 4)[1],
+    "M" = prettycols(palette = 'Lively', n = 4)[2],
+    "S" = prettycols(palette = 'Lively', n = 4)[3],
+    "VS" = prettycols(palette = 'Lively', n = 4)[4]
+  ),breaks = c("P", "M", "S", "VS"))+
+  #PrettyCols::scale_color_pretty_d(palette = 'Lively',scale_name='Lively')+
   facet_wrap(tool~.,scales='free_y')+
   theme_minimal()+theme(legend.position = 'top',axis.text.x = element_text(angle=-60,hjust=0))+
   labs(x='Conservation',y='Score',color='Criteria',size='TPR')
